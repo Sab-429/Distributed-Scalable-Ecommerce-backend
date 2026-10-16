@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package order.v1;
+
+option go_package = "order-service/proto/order/v1";
+
+
+// Order Service
+service OrderService {
+    // Get an Order by ID
+    rpc GetOrder(GetOrderRequest)
+        returns (GetOrderResponse);
+    
+    // Create a new order
+    rpc CreateOrder(CreateOrderRequest)
+        returns (CreateOrderResponse);
+
+    // Cancel an order
+    rpc CancelOrder(CancelOrderRequest)
+        returns (CancelOrderResponse);
+}
+
+
+// Requests 
+
+message GetOrderRequest {
+    uint64 order_id = 1;
+}
+
+message CreateOrderRequest {
+    uint64 user_id = 1;
+
+    repeated CreateOrderItem items = 2;
+}
+
+message CreateOrderItem {
+    uint64 product_id = 1;
+
+    int32 quantity = 2;
+}
+
+message CancelOrderRequest {
+    uint64 order_id = 1;
+}
+
+// Response
+
+message GetOrderResponse {
+    Order order = 1;
+}
+
+
+message CreateOrderResponse {
+    Order order = 1;
+}
+
+
+message CancelOrderResponse {
+    Order order = 1;
+}
+
+// order
+
+message Order {
+
+    uint64 id = 1;
+
+    uint64 user_id = 2;
+
+    OrderStatus status = 3;
+
+    int64 total_amount = 4;
+
+    string currency = 5;
+
+    repeated OrderItem items = 6;
+
+    string created_at = 7;
+
+    string updated_at = 8;
+}
+
+// order Item
+
+message OrderItem {
+
+    uint64 id = 1;
+
+    uint64 order_id = 2;
+
+    uint64 product_id = 3;
+
+    // Snapshot of the product name at purchase time.
+    string product_name = 4;
+
+    int32 quantity = 5;
+
+    // Price at the time of purchase.
+    int64 unit_price = 6;
+
+    int64 subtotal = 7;
+
+    string created_at = 8;
+}
+
+enum OrderStatus {
+
+    ORDER_STATUS_UNSPECIFIED = 0;
+
+    ORDER_STATUS_PENDING = 1;
+
+    ORDER_STATUS_CONFIRMED = 2;
+
+    ORDER_STATUS_CANCELLED = 3;
+
+    ORDER_STATUS_COMPLETED = 4;
+}

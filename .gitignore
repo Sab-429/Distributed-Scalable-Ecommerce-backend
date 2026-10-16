@@ -1,0 +1,38 @@
+# =============================================================================
+# Root .gitignore — distributed-service
+# =============================================================================
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env
+!*.env.example        # keep example files
+
+# ── Compiled binaries ─────────────────────────────────────────────────────────
+*.exe
+*.out
+bin/
+
+# ── Logs & runtime artifacts ──────────────────────────────────────────────────
+logs/
+*.log
+/tmp/services.pids
+
+# ── Go toolchain ──────────────────────────────────────────────────────────────
+vendor/
+go.work
+go.work.sum
+
+# ── Proto generated files (regenerate with protoc) ────────────────────────────
+# Comment this out if you prefer to commit generated pb.go files
+*.pb.go
+
+# ── OS artifacts ─────────────────────────────────────────────────────────────
+desktop.ini
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package product.v1;
+
+option go_package = "order-service/proto/product/v1";
+
+service ProductService {
+    rpc GetProduct(GetProductRequest)
+        returns (GetProductResponse);
+}
+
+message GetProductRequest {
+    uint64 product_id = 1;
+}
+message GetProductResponse {
+    Product product = 1;
+}
+
+message Product {
+    uint64 id = 1;
+
+    string name = 2;
+
+    int64 price_minor = 3;
+
+    string currency = 4;
+
+    int32 stock = 5;
+
+    string category = 6;
+
+    string description = 7;
+}
