@@ -125,7 +125,10 @@ start_service() {
     local name="$1"
     local dir="$2"
     local bin="$3"
-    local log_file="$LOG_DIR/${bin}.log"
+    # Use the service NAME, not the binary name: every service builds to a
+    # binary called "server", so logging to ${bin}.log made all six services
+    # interleave into a single logs/server.log with no way to tell them apart.
+    local log_file="$LOG_DIR/${name}.log"
     local binary="$dir/$bin"
 
     # build produced the binary inside the service dir when targeting ./cmd/server/...
@@ -140,7 +143,7 @@ start_service() {
         exit 1
     fi
 
-    info "Starting ${BOLD}${name}${RESET} → log: logs/${bin}.log"
+    info "Starting ${BOLD}${name}${RESET} → log: logs/${name}.log"
     "$binary" >> "$log_file" 2>&1 &
     local pid=$!
     echo "$pid $name" >> "$PID_FILE"
@@ -151,13 +154,20 @@ start_service() {
 wait_for_port() {
     local name="$1"
     local port="$2"
-    local retries=20
+    # 120 × 0.5s = 60s. order-service needs ~17s here: its DATABASE_URL points
+    # at remote Neon (serverless Postgres), and AutoMigrate's schema-inspection
+    # queries are slow on a cold compute. The old value (20 retries = 10s) timed
+    # out before it could finish, aborting the whole script via `set -e`.
+    local retries=120
     local i=0
     while ! (echo > /dev/tcp/localhost/"$port") 2>/dev/null; do
         sleep 0.5
-        (( i++ ))
+        # NOTE: was `(( i++ ))` — a post-increment evaluates to 0 when i=0,
+        # so bash arithmetic returned status 1 and `set -e` killed the whole
+        # script on the first loop iteration. Plain assignment always exits 0.
+        i=$((i + 1))
         if (( i >= retries )); then
-            warn "$name did not become ready on port $port within ${retries}s"
+            warn "$name did not become ready on port $port within $((retries / 2))s"
             return 1
         fi
     done
