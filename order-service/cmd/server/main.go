@@ -34,7 +34,7 @@ func main() {
 	cfg := config.Load()
 
 	// ── Database ─────────────────────────────────────────────────────────────
-	db, err := database.Connect(cfg.DatabaseURL)
+	db, err := database.Connect(cfg)
 	if err != nil {
 		log.Fatal("database connection failed:", err)
 	}

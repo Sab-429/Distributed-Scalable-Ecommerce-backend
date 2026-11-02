@@ -154,10 +154,10 @@ start_service() {
 wait_for_port() {
     local name="$1"
     local port="$2"
-    # 120 × 0.5s = 60s. order-service needs ~17s here: its DATABASE_URL points
-    # at remote Neon (serverless Postgres), and AutoMigrate's schema-inspection
-    # queries are slow on a cold compute. The old value (20 retries = 10s) timed
-    # out before it could finish, aborting the whole script via `set -e`.
+    # 120 × 0.5s = 60s. order-service's AutoMigrate runs schema-inspection
+    # queries on startup, which on a slow/cold Postgres can take a few seconds.
+    # The old value (20 retries = 10s) could time out before it finished,
+    # aborting the whole script via `set -e`.
     local retries=120
     local i=0
     while ! (echo > /dev/tcp/localhost/"$port") 2>/dev/null; do

@@ -1,10 +1,10 @@
 package database
 
 import (
-	"log"
-	"os"
+	"fmt"
 	"time"
 
+	"payment-service/internal/config"
 	"payment-service/internal/models"
 
 	"gorm.io/driver/postgres"
@@ -12,33 +12,29 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func Connect(databaseURL string) (*gorm.DB, error) {
-	// Custom logger: only warn on queries slower than 2s (NeonDB is a remote
-	// serverless Postgres, so schema-inspection queries during AutoMigrate can
-	// legitimately take 500ms–1s on a cold connection).
-	gormLogger := logger.New(
-		log.New(os.Stdout, "\r\n", log.LstdFlags),
-		logger.Config{
-			SlowThreshold:             2 * time.Second, // raise from default 200ms
-			LogLevel:                  logger.Warn,     // only log warnings and errors
-			IgnoreRecordNotFoundError: true,
-			Colorful:                  false,
-		},
+// Connect opens a connection to the local Postgres instance and runs
+// AutoMigrate for Payment, mirroring Auth-service and product-service
+// (host/port/user/password/dbname, sslmode=disable).
+func Connect(cfg *config.Config) (*gorm.DB, error) {
+	dsn := fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable TimeZone=UTC",
+		cfg.DBHost,
+		cfg.DBPort,
+		cfg.DBUser,
+		cfg.DBPassword,
+		cfg.DBName,
 	)
 
-	db, err := gorm.Open(
-		postgres.Open(databaseURL),
-		&gorm.Config{
-			Logger: gormLogger,
-		},
-	)
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("db handle: %w", err)
 	}
 
 	sqlDB.SetMaxOpenConns(25)
@@ -48,7 +44,7 @@ func Connect(databaseURL string) (*gorm.DB, error) {
 
 	// Create / update the payments table.
 	if err := db.AutoMigrate(&models.Payment{}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("auto-migrate: %w", err)
 	}
 
 	return db, nil

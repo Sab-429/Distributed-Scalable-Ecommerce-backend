@@ -7,7 +7,11 @@ import (
 
 type Config struct {
 	ServerPort       string
-	DatabaseURL      string
+	DBHost           string
+	DBPort           string
+	DBUser           string
+	DBPassword       string
+	DBName           string
 	ProductServerURL string
 	RabbitMQHost     string
 	RabbitMQPort     string
@@ -20,7 +24,11 @@ type Config struct {
 func Load() *Config {
 	return &Config{
 		ServerPort:       getEnv("SERVER_PORT", "8082"),
-		DatabaseURL:      getEnv("DATABASE_URL", ""),
+		DBHost:           getEnv("DB_HOST", "localhost"),
+		DBPort:           getEnv("DB_PORT", "5432"),
+		DBUser:           getEnv("DB_USER", "postgres"),
+		DBPassword:       getEnv("DB_PASSWORD", ""),
+		DBName:           getEnv("DB_NAME", "order_db"),
 		ProductServerURL: getEnv("PRODUCT_SERVICE_URL", "localhost:50051"),
 		RabbitMQHost:     getEnv("RABBITMQ_HOST", "localhost"),
 		RabbitMQPort:     getEnv("RABBITMQ_PORT", "5672"),
