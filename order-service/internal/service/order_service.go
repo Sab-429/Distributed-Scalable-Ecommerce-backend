@@ -12,15 +12,19 @@ import (
 	"order-service/internal/models"
 	"order-service/internal/repository"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
-	ErrInvalidOrder       = errors.New("invalid order")
-	ErrProductNotFound    = errors.New("product not found")
-	ErrInsufficientStock  = errors.New("insufficient stock")
-	ErrOrderNotFound      = errors.New("order not found")
-	ErrUnauthorizedOrder  = errors.New("unauthorized order")
-	ErrOrderAlreadyClosed = errors.New("order already closed")
+	ErrInvalidOrder              = errors.New("invalid order")
+	ErrProductNotFound           = errors.New("product not found")
+	ErrProductServiceUnavailable = errors.New("product service unavailable")
+	ErrInsufficientStock         = errors.New("insufficient stock")
+	ErrOrderNotFound             = errors.New("order not found")
+	ErrUnauthorizedOrder         = errors.New("unauthorized order")
+	ErrOrderAlreadyClosed        = errors.New("order already closed")
 )
 
 type OrderService struct {
@@ -65,7 +69,19 @@ func (s *OrderService) CreateOrder(
 
 		product, err := s.productClient.GetProduct(ctx, item.ProductID)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrProductNotFound, err)
+			// Inspect the gRPC status code to distinguish "product doesn't
+			// exist" (404) from "product-service is down / timed out" (503).
+			if st, ok := status.FromError(err); ok {
+				switch st.Code() {
+				case codes.NotFound:
+					return nil, fmt.Errorf("%w: %v", ErrProductNotFound, err)
+				case codes.DeadlineExceeded, codes.Unavailable, codes.Internal:
+					return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
+				default:
+					return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
+				}
+			}
+			return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
 		}
 
 		if int(product.GetStock()) < item.Quantity {

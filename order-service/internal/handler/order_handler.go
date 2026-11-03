@@ -55,6 +55,10 @@ func (h *OrderHandler) CreateOrder(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": "product not found",
 			})
+		case errors.Is(err, service.ErrProductServiceUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "product service is currently unavailable",
+			})
 		case errors.Is(err, service.ErrInsufficientStock):
 			c.JSON(http.StatusConflict, gin.H{
 				"error": "insufficient stock",
