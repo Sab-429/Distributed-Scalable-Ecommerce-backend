@@ -75,7 +75,25 @@ func (s *ProductService) DeleteProduct(ctx context.Context, id uint) error {
 	return nil
 }
 
-// GetByID checks the cache before hitting the database.
+// ReserveStock atomically decrements the stock of the given product by the
+// given quantity. Returns the remaining stock after the decrement, or an
+// error if the product doesn't exist or has insufficient stock. The cache
+// entry is invalidated after a successful reservation so subsequent reads
+// reflect the updated stock.
+func (s *ProductService) ReserveStock(ctx context.Context, productID uint, quantity int) (int, error) {
+	if quantity <= 0 {
+		return 0, errors.New("quantity must be positive")
+	}
+
+	remaining, err := s.repo.ReserveStock(productID, quantity)
+	if err != nil {
+		return 0, err
+	}
+
+	// Invalidate the cache entry so the next read fetches the updated stock.
+	_ = s.cache.Delete(ctx, productID)
+	return remaining, nil
+}
 func (s *ProductService) GetByID(ctx context.Context, id uint) (*models.Product, error) {
 	product, err := s.cache.Get(ctx, id)
 	if err != nil {

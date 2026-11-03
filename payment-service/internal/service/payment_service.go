@@ -22,6 +22,7 @@ var (
 	ErrUnauthorizedPayment = errors.New("unauthorized payment")
 	ErrAlreadyPaid         = errors.New("payment already succeeded")
 	ErrPaymentCancelled    = errors.New("payment is cancelled")
+	ErrPaymentProcessing   = errors.New("payment is already processing")
 
 	// ErrEventPublish marks a settled payment whose result event could not be
 	// handed to RabbitMQ. The payment itself is persisted, so callers should
@@ -89,8 +90,16 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 			log.Printf("[payments] order %d was cancelled — ignoring order.created (event %s)",
 				event.OrderID, event.EventID)
 			return nil
+		case models.PaymentStatusProcessing:
+			// A charge is already in-flight for this order (e.g. a redelivered
+			// order.created arrived while the first process() call is still
+			// talking to the gateway).  Re-charging would double-charge the
+			// customer. Skip and let the in-flight charge complete.
+			log.Printf("[payments] payment %d for order %d is already processing — skipping redelivery (event %s)",
+				payment.ID, event.OrderID, event.EventID)
+			return nil
 		default:
-			// pending / processing / failed → (re)attempt the charge.
+			// pending / failed → (re)attempt the charge.
 			return s.process(ctx, payment, payment.Method)
 		}
 
@@ -283,6 +292,10 @@ func (s *PaymentService) Pay(
 		return payment, ErrAlreadyPaid
 	case models.PaymentStatusCancelled:
 		return payment, ErrPaymentCancelled
+	case models.PaymentStatusProcessing:
+		// A charge is already in-flight (e.g. the order.created consumer
+		// is still talking to the gateway). Re-charging would double-charge.
+		return payment, ErrPaymentProcessing
 	}
 
 	if err := s.process(ctx, payment, req.Method); err != nil {

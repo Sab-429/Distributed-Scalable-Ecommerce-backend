@@ -7,6 +7,12 @@ option go_package = "product-service/proto/product/v1";
 service ProductService {
     rpc GetProduct(GetProductRequest)
         returns (GetProductResponse);
+
+    // Atomically decrements stock for the given product by the requested
+    // quantity. Returns the remaining stock, or an error if the product
+    // does not exist or has insufficient stock.
+    rpc ReserveStock(ReserveStockRequest)
+        returns (ReserveStockResponse);
 }
 
 message GetProductRequest {
@@ -14,6 +20,19 @@ message GetProductRequest {
 }
 message GetProductResponse {
     Product product = 1;
+}
+
+message ReserveStockRequest {
+    uint64 product_id = 1;
+
+    int32 quantity = 2;
+}
+message ReserveStockResponse {
+    bool success = 1;
+
+    int32 remaining_stock = 2;
+
+    string message = 3;
 }
 
 message Product {

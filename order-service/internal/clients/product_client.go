@@ -50,6 +50,24 @@ func (c *ProductClient) GetProduct(ctx context.Context, productID uint) (*pb.Pro
 	return resp.GetProduct(), nil
 }
 
+// ReserveStock atomically decrements the stock of the given product by the
+// given quantity via the product-service gRPC RPC. Returns true if the
+// reservation succeeded, false (with a message) if stock was insufficient.
+func (c *ProductClient) ReserveStock(ctx context.Context, productID uint, quantity int) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	resp, err := c.client.ReserveStock(ctx, &pb.ReserveStockRequest{
+		ProductId: uint64(productID),
+		Quantity:  int32(quantity),
+	})
+	if err != nil {
+		return false, fmt.Errorf("product service ReserveStock: %w", err)
+	}
+
+	return resp.GetSuccess(), nil
+}
+
 // Close releases the underlying gRPC connection.
 func (c *ProductClient) Close() error {
 	return c.conn.Close()

@@ -4,7 +4,9 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"product-service/internal/cache"
 	"product-service/internal/config"
@@ -14,6 +16,7 @@ import (
 	"product-service/internal/repository"
 	"product-service/internal/routes"
 	"product-service/internal/service"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -65,6 +68,7 @@ func main() {
 	// Build the handler with its service dependency injected.
 	productHandler := handler.NewProductHandler(productService)
 
+	// ── gRPC server ──────────────────────────────────────────────────────────
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(func(
 			ctx context.Context,
@@ -103,6 +107,7 @@ func main() {
 		}
 	}()
 
+	// ── HTTP server ───────────────────────────────────────────────────────────
 	router := gin.Default()
 
 	// Pass the fully-initialised handler, not a bare zero-value struct.
@@ -113,9 +118,39 @@ func main() {
 		port = "8080"
 	}
 
-	log.Println("Server running on port", port)
-
-	if err := router.Run(":" + port); err != nil {
-		log.Fatal(err)
+	server := &http.Server{
+		Addr:         ":" + port,
+		Handler:      router,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	go func() {
+		log.Printf("Product Service running on port %s (gRPC :50051)", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("product server failed:", err)
+		}
+	}()
+
+	// ── Graceful shutdown ─────────────────────────────────────────────────────
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+
+	log.Println("shutting down product-service...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Stop accepting new HTTP requests and finish in-flight ones.
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatal("product server forced to shutdown:", err)
+	}
+
+	// GracefulStop waits for in-flight gRPC RPCs to finish, then stops the
+	// server. New requests are rejected during this time.
+	grpcServer.GracefulStop()
+
+	log.Println("product-service stopped")
 }

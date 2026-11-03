@@ -3,12 +3,14 @@ package grpc
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"gorm.io/gorm"
 
 	v1 "product-service/proto/product/v1"
+	"product-service/internal/repository"
 	"product-service/internal/service"
 )
 
@@ -44,5 +46,30 @@ func (s *ProductServer) GetProduct(ctx context.Context, req *v1.GetProductReques
 			Stock:       int32(product.Stock),
 			Category:    product.Category,
 		},
+	}, nil
+}
+
+// ReserveStock handles the gRPC ReserveStock RPC. It atomically decrements
+// stock for the given product, preventing concurrent orders from overselling.
+func (s *ProductServer) ReserveStock(ctx context.Context, req *v1.ReserveStockRequest) (*v1.ReserveStockResponse, error) {
+	remaining, err := s.svc.ReserveStock(ctx, uint(req.GetProductId()), int(req.GetQuantity()))
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return nil, status.Errorf(codes.NotFound, "product %d not found", req.GetProductId())
+		}
+		if errors.Is(err, repository.ErrInsufficientStock) {
+			return &v1.ReserveStockResponse{
+				Success:        false,
+				RemainingStock: int32(remaining),
+				Message:        fmt.Sprintf("insufficient stock for product %d: %d available", req.GetProductId(), remaining),
+			}, nil
+		}
+		return nil, status.Errorf(codes.Internal, "failed to reserve stock: %v", err)
+	}
+
+	return &v1.ReserveStockResponse{
+		Success:        true,
+		RemainingStock: int32(remaining),
+		Message:        fmt.Sprintf("reserved %d units of product %d", req.GetQuantity(), req.GetProductId()),
 	}, nil
 }

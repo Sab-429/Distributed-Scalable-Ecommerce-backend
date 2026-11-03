@@ -158,6 +158,10 @@ func (h *PaymentHandler) Pay(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{
 				"error": "payment is cancelled",
 			})
+		case errors.Is(err, service.ErrPaymentProcessing):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "payment is already processing",
+			})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "failed to process payment",

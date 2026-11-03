@@ -88,6 +88,26 @@ func (s *OrderService) CreateOrder(
 			return nil, ErrInsufficientStock
 		}
 
+		// Atomically reserve stock via gRPC to prevent concurrent overselling.
+		success, err := s.productClient.ReserveStock(ctx, item.ProductID, item.Quantity)
+		if err != nil {
+			// gRPC-level error (service down, timeout, etc.)
+			if st, ok := status.FromError(err); ok {
+				switch st.Code() {
+				case codes.NotFound:
+					return nil, fmt.Errorf("%w: %v", ErrProductNotFound, err)
+				default:
+					return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
+				}
+			}
+			return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
+		}
+		if !success {
+			// Stock was sufficient at read time but the atomic reservation
+			// failed — another order beat us to it.
+			return nil, ErrInsufficientStock
+		}
+
 		unitPrice := product.GetPriceMinor()
 		subtotal := unitPrice * int64(item.Quantity)
 		total += subtotal
