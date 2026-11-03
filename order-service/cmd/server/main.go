@@ -68,14 +68,23 @@ func main() {
 
 	// ── Service layer ─────────────────────────────────────────────────────────
 	orderRepository := repository.NewOrderRepository(db)
+	outboxRepository := repository.NewOutboxRepository(db)
 
 	orderService := service.NewOrderService(
 		orderRepository,
 		productClient,
-		publisher,
 	)
 
 	orderHandler := handler.NewOrderHandler(orderService)
+
+	// ── Outbox relay (publishes pending outbox events to RabbitMQ) ───────────
+	outboxRelay := messaging.NewOutboxRelay(
+		outboxRepository,
+		publisher,
+		cfg.OutboxBatchSize,
+		cfg.OutboxInterval,
+	)
+	outboxRelay.Start()
 
 	// ── RabbitMQ (payment consumer connection) ───────────────────────────────
 	// Consumes payment.completed / payment.failed so a long-lived consumer
@@ -139,6 +148,9 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal("order server forced to shutdown:", err)
 	}
+
+	// Stop the outbox relay so it doesn't publish while connections are closing.
+	outboxRelay.Stop()
 
 	// Drain in-flight payment messages, then release the consumer connection.
 	paymentConsumer.Stop()

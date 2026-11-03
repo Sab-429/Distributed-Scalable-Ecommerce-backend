@@ -42,8 +42,8 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
-	// Create / update tables for Order and OrderItem.
-	if err := db.AutoMigrate(&models.Order{}, &models.OrderItem{}); err != nil {
+	// Create / update tables for Order, OrderItem, and OutboxEvent.
+	if err := db.AutoMigrate(&models.Order{}, &models.OrderItem{}, &models.OutboxEvent{}); err != nil {
 		return nil, fmt.Errorf("auto-migrate: %w", err)
 	}
 

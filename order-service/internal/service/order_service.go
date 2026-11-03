@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +11,7 @@ import (
 	"order-service/internal/messaging"
 	"order-service/internal/models"
 	"order-service/internal/repository"
+	"time"
 )
 
 var (
@@ -24,18 +26,15 @@ var (
 type OrderService struct {
 	repo          *repository.OrderRepository
 	productClient *clients.ProductClient
-	publisher     *messaging.Publisher
 }
 
 func NewOrderService(
 	repo *repository.OrderRepository,
 	productClient *clients.ProductClient,
-	publisher *messaging.Publisher,
 ) *OrderService {
 	return &OrderService{
 		repo:          repo,
 		productClient: productClient,
-		publisher:     publisher,
 	}
 }
 
@@ -88,11 +87,13 @@ func (s *OrderService) CreateOrder(
 
 	order.TotalAmount = total
 
-	if err := s.repo.Create(ctx, order); err != nil {
-		return nil, err
-	}
+	// ── Build the order.created event for the outbox ──────────────────────────
+	//
+	// The order ID isn't known until after the INSERT (auto-increment), but the
+	// outbox event payload must contain it. CreateWithOutbox solves this by
+	// accepting a callback that runs inside the transaction after the order
+	// row is created — so the event gets the real ID.
 
-	// ── Publish order.created event ─────────────────────────────────────────
 	itemEvents := make([]messaging.OrderItemEvent, len(order.Items))
 	for i, item := range order.Items {
 		itemEvents[i] = messaging.OrderItemEvent{
@@ -104,20 +105,41 @@ func (s *OrderService) CreateOrder(
 		}
 	}
 
+	// Pre-generate the event UUID so it's available even though OrderID is
+	// filled in by the callback.
 	event := messaging.NewOrderCreatedEvent(
-		order.ID,
+		0, // filled in by the callback after the order ID is known
 		order.UserID,
 		order.TotalAmount,
 		order.Currency,
 		itemEvents,
 	)
 
-	if err := s.publisher.PublishOrderCreated(ctx, event); err != nil {
-		// Log the error but don't fail the order — it's already persisted.
-		log.Printf("[messaging] failed to publish order.created for order %d: %v", order.ID, err)
-	} else {
-		log.Printf("[messaging] published order.created for order %d (event %s)", order.ID, event.EventID)
+	buildOutbox := func(created *models.Order) (*models.OutboxEvent, error) {
+		event.OrderID = created.ID
+		event.CreatedAt = time.Now()
+
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("marshal order.created event: %w", err)
+		}
+
+		return &models.OutboxEvent{
+			EventID:     event.EventID,
+			EventType:   event.EventType,
+			AggregateID: created.ID,
+			RoutingKey:  messaging.OrderCreatedRoutingKey,
+			Payload:     payload,
+			Status:      models.OutboxStatusPending,
+			CreatedAt:   time.Now(),
+		}, nil
 	}
+
+	if err := s.repo.CreateWithOutbox(ctx, order, buildOutbox); err != nil {
+		return nil, err
+	}
+
+	log.Printf("[outbox] queued order.created for order %d (event %s)", order.ID, event.EventID)
 
 	return order, nil
 }
@@ -168,11 +190,7 @@ func (s *OrderService) CancelOrder(
 		return ErrOrderAlreadyClosed
 	}
 
-	if err := s.repo.UpdateStatus(ctx, orderID, models.OrderStatusCancelled); err != nil {
-		return err
-	}
-
-	// ── Publish order.cancelled event ───────────────────────────────────────
+	// ── Build the order.cancelled event for the outbox ──────────────────────
 	event := messaging.NewOrderCancelledEvent(
 		order.ID,
 		order.UserID,
@@ -181,12 +199,31 @@ func (s *OrderService) CancelOrder(
 		"", // reason — could be passed from the request in future
 	)
 
-	if err := s.publisher.PublishOrderCancelled(ctx, event); err != nil {
-		log.Printf("[messaging] failed to publish order.cancelled for order %d: %v", order.ID, err)
-	} else {
-		log.Printf("[messaging] published order.cancelled for order %d (event %s)", order.ID, event.EventID)
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal order.cancelled event: %w", err)
 	}
 
+	outboxEvent := &models.OutboxEvent{
+		EventID:     event.EventID,
+		EventType:   event.EventType,
+		AggregateID: order.ID,
+		RoutingKey:  messaging.OrderCancelledRoutingKey,
+		Payload:     payload,
+		Status:      models.OutboxStatusPending,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.repo.UpdateStatusWithOutbox(
+		ctx,
+		orderID,
+		models.OrderStatusCancelled,
+		outboxEvent,
+	); err != nil {
+		return err
+	}
+
+	log.Printf("[outbox] queued order.cancelled for order %d (event %s)", order.ID, event.EventID)
 	return nil
 }
 
@@ -206,11 +243,7 @@ func (s *OrderService) CompleteOrder(
 		return ErrOrderAlreadyClosed
 	}
 
-	if err := s.repo.UpdateStatus(ctx, orderID, models.OrderStatusCompleted); err != nil {
-		return err
-	}
-
-	// ── Publish order.completed event ───────────────────────────────────────
+	// ── Build the order.completed event for the outbox ──────────────────────
 	event := messaging.NewOrderCompletedEvent(
 		order.ID,
 		order.UserID,
@@ -218,11 +251,30 @@ func (s *OrderService) CompleteOrder(
 		order.Currency,
 	)
 
-	if err := s.publisher.PublishOrderCompleted(ctx, event); err != nil {
-		log.Printf("[messaging] failed to publish order.completed for order %d: %v", order.ID, err)
-	} else {
-		log.Printf("[messaging] published order.completed for order %d (event %s)", order.ID, event.EventID)
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("marshal order.completed event: %w", err)
 	}
 
+	outboxEvent := &models.OutboxEvent{
+		EventID:     event.EventID,
+		EventType:   event.EventType,
+		AggregateID: order.ID,
+		RoutingKey:  messaging.OrderCompletedRoutingKey,
+		Payload:     payload,
+		Status:      models.OutboxStatusPending,
+		CreatedAt:   time.Now(),
+	}
+
+	if err := s.repo.UpdateStatusWithOutbox(
+		ctx,
+		orderID,
+		models.OrderStatusCompleted,
+		outboxEvent,
+	); err != nil {
+		return err
+	}
+
+	log.Printf("[outbox] queued order.completed for order %d (event %s)", order.ID, event.EventID)
 	return nil
 }
