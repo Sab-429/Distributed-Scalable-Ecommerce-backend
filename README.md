@@ -488,7 +488,53 @@ flowchart TD
 This sequence shows the request path and the asynchronous work that continues after the HTTP response.
 
 ```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant G as API Gateway :8000
+    participant O as Order Service :8082
+    participant P as Product Service gRPC :50051
+    participant R as Redis :6379
+    participant PD as Product PostgreSQL
+    participant ODB as Order PostgreSQL
+    participant MQ as RabbitMQ
+    participant PAY as Payment Service
+    participant N as Notification Worker
 
+    C->>G: POST /api/v1/orders with JWT
+    G->>G: Validate JWT, authorize role, apply rate limit
+    G->>G: Remove spoofed identity headers and set trusted headers
+    G->>O: Forward HTTP request with verified user identity
+
+    loop For each order line item
+        O->>P: GetProduct(product_id)
+        P->>R: GET product cache key
+        alt Cache hit
+            R-->>P: Cached product
+        else Cache miss
+            P->>PD: Read product record
+            PD-->>P: Product row
+            P->>R: Store product with TTL
+        end
+        P-->>O: Product name, price, stock and currency
+    end
+
+    O->>ODB: Insert order and order_items
+    ODB-->>O: Transaction committed
+    O->>MQ: Publish order.created
+    O-->>G: HTTP 201 Created (payment pending)
+    G-->>C: HTTP 201 Created
+
+    par Payment consumer
+        MQ-->>PAY: order.created
+        PAY->>PAY: Process payment
+        PAY->>MQ: Publish payment.completed or payment.failed
+        MQ-->>O: Payment result event
+        O->>ODB: Idempotently update order status
+    and Notification consumer
+        MQ-->>N: order.created
+        N->>N: Log or send notification
+    end
 ```
 
 ### Important response semantics
