@@ -28,41 +28,128 @@ A documentation-first overview of the distributed backend: API gateway, independ
 The API Gateway is the single public entry point. Client requests arrive over HTTP and are routed to the appropriate backend service. Each service owns its own data store. Services communicate synchronously through gRPC when an immediate response is required, and asynchronously through RabbitMQ when work can proceed through events.
 
 ```mermaid
-flowchart TB
+flowchart LR
     C["Browser / API Consumer<br/>HTTP :8000"] --> GW
 
     subgraph G["API Gateway — Go + Gin :8000"]
-      GW["Gateway Router"]
-      MW["Recovery → Request ID → Logging<br/>Security Headers → Rate Limit → CORS"]
-      AUTHZ["Public routes and JWT authorization<br/>Role checks for protected routes"]
-      HDR["Remove client identity headers<br/>Set verified X-User-ID / X-User-Role<br/>Add X-Gateway / X-Request-ID"]
-      GC["Gateway response cache<br/>GET /products"]
-      GW --> MW --> AUTHZ --> HDR
-      HDR -. "GET /products" .-> GC
+        direction TB
+
+        GW["Gateway Router"]
+
+        MW["Middleware Pipeline<br/>Recovery → Request ID → Logging<br/>Security Headers → Rate Limit → CORS"]
+
+        AUTHZ["Authentication & Authorization<br/>Public routes and JWT authorization<br/>Role checks for protected routes"]
+
+        HDR["Trusted Header Management<br/>Remove client identity headers<br/>Set verified X-User-ID / X-User-Role<br/>Add X-Gateway / X-Request-ID"]
+
+        GC["Gateway Response Cache<br/>GET /products"]
+
+        GW --> MW --> AUTHZ --> HDR
+        HDR -.->|"GET /products"| GC
     end
 
-    HDR -->|"HTTP proxy :8081"| AS["Auth Service<br/>Go + Gin"]
-    HDR -->|"HTTP proxy :8080"| PS["Product Service<br/>Go + Gin"]
-    HDR -->|"HTTP proxy :8082"| OS["Order Service<br/>Go + Gin"]
-    HDR -->|"HTTP proxy :8083"| PAY["Payment Service<br/>Go + Gin"]
+    %% Gateway to microservices
+    HDR -->|"HTTP proxy :8081"| AS
+    HDR -->|"HTTP proxy :8080"| PS
+    HDR -->|"HTTP proxy :8082"| OS
+    HDR -->|"HTTP proxy :8083"| PAY
 
-    AS --> ADB[("Auth PostgreSQL<br/>users, refresh_tokens")]
-    PS --> PDB[("Product PostgreSQL<br/>products")]
-    OS --> ODB[("Order PostgreSQL<br/>orders, order_items")]
-    PAY --> PAYDB[("Payment PostgreSQL<br/>payments")]
+    %% Authentication Service
+    subgraph AUTH["Authentication Service"]
+        direction TB
+        AS["Auth Service<br/>Go + Gin :8081<br/><br/>POST /api/v1/auth/register<br/>POST /api/v1/auth/login<br/>GET /api/v1/auth/me<br/>POST /api/v1/auth/refresh<br/>POST /api/v1/auth/logout<br/>POST /api/v1/auth/logout-all"]
+        ADB[("Auth PostgreSQL<br/>users<br/>refresh_tokens")]
+        AS --> ADB
+    end
 
-    PS <-->|"gRPC :50051<br/>ProductService.GetProduct"| OS
+    %% Product Service
+    subgraph PRODUCT["Product Service"]
+        direction TB
+        PS["Product Service<br/>Go + Gin :8080<br/><br/>POST /api/v1/products<br/>GET /api/v1/products<br/>GET /api/v1/products/:id<br/>PUT /api/v1/products/:id<br/>DELETE /api/v1/products/:id<br/><br/>gRPC Server :50051<br/>ProductService.GetProduct<br/>ProductService.ReserveStock"]
+        PDB[("Product PostgreSQL<br/>products")]
+        PS --> PDB
+    end
 
-    REDIS[("Redis :6379<br/>Product cache + gateway cache")]
-    PS <-->|"Product cache-aside"| REDIS
-    GC <-->|"Response cache"| REDIS
+    %% Order Service
+    subgraph ORDER["Order Service"]
+        direction TB
+        OS["Order Service<br/>Go + Gin :8082<br/><br/>POST /api/v1/orders<br/>GET /api/v1/orders<br/>GET /api/v1/orders/:id<br/>POST /api/v1/orders/:id/cancel<br/>POST /api/v1/orders/:id/complete"]
+        ODB[("Order PostgreSQL<br/>orders<br/>order_items")]
+        OS --> ODB
+    end
 
-    OS -->|"order.created / cancelled / completed"| RMQ
-    PAY -->|"payment.completed / failed"| RMQ
-    RMQ["RabbitMQ<br/>order.events + payment.events"]
-    RMQ -->|"order.created"| PAY
-    RMQ -->|"order events"| NW["Notification Worker"]
-    RMQ -->|"payment result events"| OS
+    %% Payment Service
+    subgraph PAYMENT["Payment Service"]
+        direction TB
+        PAY["Payment Service<br/>Go + Gin :8083<br/><br/>POST /api/v1/payments<br/>GET /api/v1/payments<br/>GET /api/v1/payments/:id<br/>POST /api/v1/payments/:id/pay"]
+        PAYDB[("Payment PostgreSQL<br/>payments")]
+        PAY --> PAYDB
+    end
+
+    %% gRPC communication
+    OS <-->|"gRPC :50051<br/>GetProduct / ReserveStock"| PS
+
+    %% Redis caching
+    REDIS[("Redis :6379<br/><br/>Product Cache<br/>Gateway Response Cache")]
+
+    PS <-->|"Product Cache-Aside"| REDIS
+    GC <-->|"Gateway Response Cache"| REDIS
+
+    %% RabbitMQ messaging
+    subgraph MESSAGING["RabbitMQ Messaging Infrastructure"]
+        direction TB
+
+        RMQ["RabbitMQ<br/>order.events<br/>payment.events"]
+
+        QPAY["payment.order.events"]
+        QNOTIFY["notification.order.events"]
+        QORDER["order.payment.events"]
+
+        RETRY["Retry Queues<br/>TTL"]
+        DLX["Dead Letter Exchange"]
+        DLQ["Dead Letter Queue"]
+
+        RMQ --> QPAY
+        RMQ --> QNOTIFY
+        RMQ --> QORDER
+
+        QPAY -.-> RETRY
+        QNOTIFY -.-> RETRY
+        QORDER -.-> RETRY
+
+        RETRY --> DLX --> DLQ
+    end
+
+    %% Event producers
+    OS -->|"order.created<br/>order.cancelled<br/>order.completed"| RMQ
+
+    PAY -->|"payment.completed<br/>payment.failed"| RMQ
+
+    %% Event consumers
+    QPAY -->|"order.created"| PAY
+
+    QNOTIFY --> NW["Notification Worker<br/>Background Go Consumer"]
+
+    QORDER -->|"Payment result events"| OS
+
+    %% Business event lifecycle
+    OS -.->|"Order creation does not mean payment success"| PAY
+
+    %% Important payment state rule
+    PAY -.->|"Explicit payment request only"| PAY
+
+    %% Styling
+    classDef gateway fill:#d5e8d4,stroke:#82b366,color:#000
+    classDef service fill:#dae8fc,stroke:#6c8ebf,color:#000
+    classDef database fill:#fff2cc,stroke:#d6b656,color:#000
+    classDef messaging fill:#f8cecc,stroke:#b85450,color:#000
+    classDef infrastructure fill:#e1d5e7,stroke:#9673a6,color:#000
+
+    class GW,MW,AUTHZ,HDR,GC gateway
+    class AS,PS,OS,PAY,NW service
+    class ADB,PDB,ODB,PAYDB database
+    class RMQ,QPAY,QNOTIFY,QORDER,RETRY,DLX,DLQ messaging
+    class REDIS infrastructure
 ```
 
 ### High-level communication rules
