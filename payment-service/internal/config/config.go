@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 type Config struct {
@@ -20,6 +21,8 @@ type Config struct {
 	MaxRetries           int
 	DefaultPaymentMethod string
 	SimulatedLatencyMs   int
+	OutboxBatchSize      int
+	OutboxInterval       time.Duration
 }
 
 func Load() *Config {
@@ -38,6 +41,8 @@ func Load() *Config {
 		MaxRetries:           getIntEnv("MAX_RETRIES", 3),
 		DefaultPaymentMethod: getEnv("DEFAULT_PAYMENT_METHOD", "card"),
 		SimulatedLatencyMs:   getIntEnv("SIMULATED_LATENCY_MS", 300),
+		OutboxBatchSize:      getIntEnv("OUTBOX_BATCH_SIZE", 50),
+		OutboxInterval:       getDurationEnv("OUTBOX_INTERVAL", 2*time.Second),
 	}
 }
 
@@ -53,6 +58,18 @@ func getIntEnv(key string, fallback int) int {
 	if value := os.Getenv(key); value != "" {
 		if n, err := strconv.Atoi(value); err == nil && n >= 0 {
 			return n
+		}
+	}
+	return fallback
+}
+
+func getDurationEnv(key string, fallback time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if d, err := time.ParseDuration(value); err == nil {
+			return d
+		}
+		if n, err := strconv.Atoi(value); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
 		}
 	}
 	return fallback

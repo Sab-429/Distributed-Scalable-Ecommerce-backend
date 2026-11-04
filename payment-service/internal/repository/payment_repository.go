@@ -84,6 +84,30 @@ func (r *PaymentRepository) Update(
 	return r.db.WithContext(ctx).Save(payment).Error
 }
 
+// UpdateWithOutbox saves the payment and writes an outbox event in a single
+// transaction. This guarantees that the payment state change and the event
+// are committed atomically — if the service crashes, either both are
+// persisted or neither is.
+func (r *PaymentRepository) UpdateWithOutbox(
+	ctx context.Context,
+	payment *models.Payment,
+	outboxEvent *models.OutboxEvent,
+) error {
+	return r.db.WithContext(ctx).Transaction(
+		func(tx *gorm.DB) error {
+			if err := tx.Save(payment).Error; err != nil {
+				return err
+			}
+			if outboxEvent != nil {
+				if err := tx.Create(outboxEvent).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+}
+
 // CancelPendingByOrderID marks non-settled payments of a cancelled order as
 // cancelled. It returns the number of rows updated.
 func (r *PaymentRepository) CancelPendingByOrderID(

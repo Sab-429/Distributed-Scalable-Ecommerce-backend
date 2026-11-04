@@ -73,3 +73,21 @@ func (s *ProductServer) ReserveStock(ctx context.Context, req *v1.ReserveStockRe
 		Message:        fmt.Sprintf("reserved %d units of product %d", req.GetQuantity(), req.GetProductId()),
 	}, nil
 }
+
+// ReleaseStock handles the gRPC ReleaseStock RPC. It atomically increments
+// stock back for the given product, used to roll back a reservation when
+// order creation fails.
+func (s *ProductServer) ReleaseStock(ctx context.Context, req *v1.ReleaseStockRequest) (*v1.ReleaseStockResponse, error) {
+	remaining, err := s.svc.ReleaseStock(ctx, uint(req.GetProductId()), int(req.GetQuantity()))
+	if err != nil {
+		if errors.Is(err, repository.ErrProductNotFound) {
+			return nil, status.Errorf(codes.NotFound, "product %d not found", req.GetProductId())
+		}
+		return nil, status.Errorf(codes.Internal, "failed to release stock: %v", err)
+	}
+
+	return &v1.ReleaseStockResponse{
+		RemainingStock: int32(remaining),
+		Message:        fmt.Sprintf("released %d units of product %d", req.GetQuantity(), req.GetProductId()),
+	}, nil
+}

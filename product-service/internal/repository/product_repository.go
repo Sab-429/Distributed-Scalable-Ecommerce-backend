@@ -82,3 +82,28 @@ func (r *ProductRepository) ReserveStock(productID uint, quantity int) (int, err
 func (r *ProductRepository) Delete(id uint) error {
 	return r.db.Delete(&models.Product{}, id).Error
 }
+
+// ReleaseStock atomically increments the stock of the given product by the
+// given quantity. This is the rollback counterpart of ReserveStock — it
+// restores stock that was reserved but no longer needed (e.g. order creation
+// failed after some items were already reserved). Returns the remaining stock
+// after the increment, or an error if the product doesn't exist.
+func (r *ProductRepository) ReleaseStock(productID uint, quantity int) (int, error) {
+	result := r.db.Model(&models.Product{}).
+		Where("id = ?", productID).
+		Update("stock", gorm.Expr("stock + ?", quantity))
+
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return 0, ErrProductNotFound
+	}
+
+	// Fetch the updated stock value.
+	var product models.Product
+	if err := r.db.Select("stock").First(&product, productID).Error; err != nil {
+		return 0, err
+	}
+	return int(product.Stock), nil
+}

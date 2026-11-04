@@ -68,6 +68,24 @@ func (c *ProductClient) ReserveStock(ctx context.Context, productID uint, quanti
 	return resp.GetSuccess(), nil
 }
 
+// ReleaseStock atomically increments the stock of the given product by the
+// given quantity, rolling back a previous reservation. Used when order
+// creation fails after some items have already been reserved.
+func (c *ProductClient) ReleaseStock(ctx context.Context, productID uint, quantity int) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	_, err := c.client.ReleaseStock(ctx, &pb.ReleaseStockRequest{
+		ProductId: uint64(productID),
+		Quantity:  int32(quantity),
+	})
+	if err != nil {
+		return fmt.Errorf("product service ReleaseStock: %w", err)
+	}
+
+	return nil
+}
+
 // Close releases the underlying gRPC connection.
 func (c *ProductClient) Close() error {
 	return c.conn.Close()

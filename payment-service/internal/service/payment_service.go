@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -32,7 +33,6 @@ var (
 
 type PaymentService struct {
 	repo          *repository.PaymentRepository
-	publisher     *messaging.Publisher
 	gateway       gateway.Gateway
 	defaultMethod string
 }
@@ -45,7 +45,6 @@ func NewPaymentService(
 ) *PaymentService {
 	return &PaymentService{
 		repo:          repo,
-		publisher:     publisher,
 		gateway:       gateway,
 		defaultMethod: defaultMethod,
 	}
@@ -82,10 +81,18 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 	case err == nil:
 		switch payment.Status {
 		case models.PaymentStatusSucceeded:
-			// Redelivered event: the payment already settled. Re-publish the
-			// completion so the order-service is guaranteed to see it
+			// Redelivered event: the payment already settled. Write an
+			// outbox event so the order-service is guaranteed to see it
 			// (its status update is idempotent).
-			return s.publishCompleted(ctx, payment)
+			outboxEvent, err := s.buildPaymentCompletedOutbox(payment)
+			if err != nil {
+				return err
+			}
+			if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
+				return fmt.Errorf("republish payment.completed for order %d: %w", event.OrderID, err)
+			}
+			log.Printf("[outbox] queued payment.completed (redelivery) for order %d", event.OrderID)
+			return nil
 		case models.PaymentStatusCancelled:
 			log.Printf("[payments] order %d was cancelled — ignoring order.created (event %s)",
 				event.OrderID, event.EventID)
@@ -145,9 +152,11 @@ func (s *PaymentService) handleOrderCancelled(ctx context.Context, event messagi
 
 // ── Charging ─────────────────────────────────────────────────────────────────
 
-// process drives a payment through the gateway and publishes the outcome.
-// The payment row is always persisted before its event is published, so a
-// crash never leaves an event without a matching database state.
+// process drives a payment through the gateway. The payment status change
+// and its outbox event are written in the same DB transaction via
+// repo.UpdateWithOutbox, so a crash never leaves the payment settled without
+// a corresponding event. The outbox relay publishes the event to RabbitMQ
+// asynchronously.
 func (s *PaymentService) process(ctx context.Context, payment *models.Payment, method string) error {
 	if method == "" {
 		method = s.defaultMethod
@@ -185,13 +194,21 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 		payment.Status = models.PaymentStatusFailed
 		payment.FailureReason = truncate(result.Message, 255)
 		payment.ProviderRef = ""
-		if err := s.repo.Update(ctx, payment); err != nil {
+
+		// Build the payment.failed outbox event.
+		outboxEvent, err := s.buildPaymentFailedOutbox(payment)
+		if err != nil {
+			return err
+		}
+
+		// Persist payment state + outbox event atomically.
+		if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
 			return fmt.Errorf("mark payment %d failed: %w", payment.ID, err)
 		}
 		log.Printf("[payments] payment %d declined for order %d: %s",
 			payment.ID, payment.OrderID, payment.FailureReason)
 
-		return s.publishFailed(ctx, payment)
+		return nil
 	}
 
 	now := time.Now()
@@ -199,16 +216,25 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 	payment.ProviderRef = result.ProviderRef
 	payment.FailureReason = ""
 	payment.PaidAt = &now
-	if err := s.repo.Update(ctx, payment); err != nil {
+
+	// Build the payment.completed outbox event.
+	outboxEvent, err := s.buildPaymentCompletedOutbox(payment)
+	if err != nil {
+		return err
+	}
+
+	// Persist payment state + outbox event atomically.
+	if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
 		return fmt.Errorf("mark payment %d succeeded: %w", payment.ID, err)
 	}
 	log.Printf("[payments] payment %d succeeded for order %d (ref %s)",
 		payment.ID, payment.OrderID, payment.ProviderRef)
 
-	return s.publishCompleted(ctx, payment)
+	return nil
 }
 
-func (s *PaymentService) publishCompleted(ctx context.Context, payment *models.Payment) error {
+// buildPaymentCompletedOutbox creates an outbox event for payment.completed.
+func (s *PaymentService) buildPaymentCompletedOutbox(payment *models.Payment) (*models.OutboxEvent, error) {
 	event := messaging.NewPaymentCompletedEvent(
 		payment.ID,
 		payment.OrderID,
@@ -219,14 +245,25 @@ func (s *PaymentService) publishCompleted(ctx context.Context, payment *models.P
 		payment.ProviderRef,
 		paidAtOrDefault(payment),
 	)
-	if err := s.publisher.PublishPaymentCompleted(ctx, event); err != nil {
-		return fmt.Errorf("%w: %v", ErrEventPublish, err)
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payment.completed event: %w", err)
 	}
-	log.Printf("[messaging] published payment.completed for order %d (event %s)", payment.OrderID, event.EventID)
-	return nil
+
+	return &models.OutboxEvent{
+		EventID:     event.EventID,
+		EventType:   event.EventType,
+		AggregateID: payment.ID,
+		RoutingKey:  messaging.PaymentCompletedRoutingKey,
+		Payload:     payload,
+		Status:      models.OutboxStatusPending,
+		CreatedAt:   time.Now(),
+	}, nil
 }
 
-func (s *PaymentService) publishFailed(ctx context.Context, payment *models.Payment) error {
+// buildPaymentFailedOutbox creates an outbox event for payment.failed.
+func (s *PaymentService) buildPaymentFailedOutbox(payment *models.Payment) (*models.OutboxEvent, error) {
 	event := messaging.NewPaymentFailedEvent(
 		payment.ID,
 		payment.OrderID,
@@ -237,11 +274,21 @@ func (s *PaymentService) publishFailed(ctx context.Context, payment *models.Paym
 		payment.FailureReason,
 		time.Now(),
 	)
-	if err := s.publisher.PublishPaymentFailed(ctx, event); err != nil {
-		return fmt.Errorf("%w: %v", ErrEventPublish, err)
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payment.failed event: %w", err)
 	}
-	log.Printf("[messaging] published payment.failed for order %d (event %s)", payment.OrderID, event.EventID)
-	return nil
+
+	return &models.OutboxEvent{
+		EventID:     event.EventID,
+		EventType:   event.EventType,
+		AggregateID: payment.ID,
+		RoutingKey:  messaging.PaymentFailedRoutingKey,
+		Payload:     payload,
+		Status:      models.OutboxStatusPending,
+		CreatedAt:   time.Now(),
+	}, nil
 }
 
 // ── HTTP use cases ───────────────────────────────────────────────────────────

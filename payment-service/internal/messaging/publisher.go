@@ -109,3 +109,41 @@ func uuidFrom(payload any) string {
 		return ""
 	}
 }
+
+// PublishRaw publishes a pre-serialized event to the payment.events exchange
+// using publisher confirms. It is used by the outbox relay, which provides
+// the routing key, event ID, event type, and already-marshaled payload.
+func (p *Publisher) PublishRaw(
+	ctx context.Context,
+	routingKey string,
+	eventID string,
+	eventType string,
+	payload []byte,
+) error {
+	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
+		ctx,
+		PaymentEventsExchange,
+		routingKey,
+		false, false,
+		amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			MessageId:    eventID,
+			Type:         eventType,
+			Timestamp:    time.Now(),
+			Body:         payload,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("publish outbox event %s: %w", eventID, err)
+	}
+
+	ack, err := dc.WaitContext(ctx)
+	if err != nil {
+		return fmt.Errorf("confirm outbox event %s publish: %w", eventID, err)
+	}
+	if !ack {
+		return fmt.Errorf("confirm outbox event %s publish: broker nacked message", eventID)
+	}
+	return nil
+}

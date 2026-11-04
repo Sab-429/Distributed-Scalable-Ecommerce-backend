@@ -62,8 +62,32 @@ func (s *OrderService) CreateOrder(
 
 	var total int64
 
+	// Track successful stock reservations so we can roll them back if a
+	// later item fails. Each entry records the product ID and quantity that
+	// was successfully reserved via ReserveStock.
+	type reservation struct {
+		productID uint
+		quantity  int
+	}
+	var reserved []reservation
+
+	// releaseAll reverses every successful reservation. Called when order
+	// creation fails after some items have already been reserved.
+	releaseAll := func() {
+		for _, r := range reserved {
+			if err := s.productClient.ReleaseStock(ctx, r.productID, r.quantity); err != nil {
+				log.Printf("[stock-rollback] failed to release %d units of product %d: %v",
+					r.quantity, r.productID, err)
+			} else {
+				log.Printf("[stock-rollback] released %d units of product %d",
+					r.quantity, r.productID)
+			}
+		}
+	}
+
 	for _, item := range req.Items {
 		if item.Quantity <= 0 {
+			releaseAll()
 			return nil, ErrInvalidOrder
 		}
 
@@ -71,12 +95,11 @@ func (s *OrderService) CreateOrder(
 		if err != nil {
 			// Inspect the gRPC status code to distinguish "product doesn't
 			// exist" (404) from "product-service is down / timed out" (503).
+			releaseAll()
 			if st, ok := status.FromError(err); ok {
 				switch st.Code() {
 				case codes.NotFound:
 					return nil, fmt.Errorf("%w: %v", ErrProductNotFound, err)
-				case codes.DeadlineExceeded, codes.Unavailable, codes.Internal:
-					return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
 				default:
 					return nil, fmt.Errorf("%w: %v", ErrProductServiceUnavailable, err)
 				}
@@ -85,6 +108,7 @@ func (s *OrderService) CreateOrder(
 		}
 
 		if int(product.GetStock()) < item.Quantity {
+			releaseAll()
 			return nil, ErrInsufficientStock
 		}
 
@@ -92,6 +116,7 @@ func (s *OrderService) CreateOrder(
 		success, err := s.productClient.ReserveStock(ctx, item.ProductID, item.Quantity)
 		if err != nil {
 			// gRPC-level error (service down, timeout, etc.)
+			releaseAll()
 			if st, ok := status.FromError(err); ok {
 				switch st.Code() {
 				case codes.NotFound:
@@ -105,8 +130,15 @@ func (s *OrderService) CreateOrder(
 		if !success {
 			// Stock was sufficient at read time but the atomic reservation
 			// failed — another order beat us to it.
+			releaseAll()
 			return nil, ErrInsufficientStock
 		}
+
+		// Record this reservation for potential rollback.
+		reserved = append(reserved, reservation{
+			productID: item.ProductID,
+			quantity:  item.Quantity,
+		})
 
 		unitPrice := product.GetPriceMinor()
 		subtotal := unitPrice * int64(item.Quantity)
@@ -172,6 +204,8 @@ func (s *OrderService) CreateOrder(
 	}
 
 	if err := s.repo.CreateWithOutbox(ctx, order, buildOutbox); err != nil {
+		// The DB transaction failed — release all reserved stock.
+		releaseAll()
 		return nil, err
 	}
 

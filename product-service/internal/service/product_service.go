@@ -94,6 +94,22 @@ func (s *ProductService) ReserveStock(ctx context.Context, productID uint, quant
 	_ = s.cache.Delete(ctx, productID)
 	return remaining, nil
 }
+
+// ReleaseStock atomically increments the stock of the given product by the
+// given quantity. Used to roll back a reservation when order creation fails.
+func (s *ProductService) ReleaseStock(ctx context.Context, productID uint, quantity int) (int, error) {
+	if quantity <= 0 {
+		return 0, errors.New("quantity must be positive")
+	}
+
+	remaining, err := s.repo.ReleaseStock(productID, quantity)
+	if err != nil {
+		return 0, err
+	}
+
+	_ = s.cache.Delete(ctx, productID)
+	return remaining, nil
+}
 func (s *ProductService) GetByID(ctx context.Context, id uint) (*models.Product, error) {
 	product, err := s.cache.Get(ctx, id)
 	if err != nil {
