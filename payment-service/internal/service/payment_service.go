@@ -59,7 +59,7 @@ var _ messaging.EventHandler = (*PaymentService)(nil)
 
 // HandleOrderEvent reacts to order.* events published by the order-service.
 //
-//	order.created   → create the payment (idempotent) and charge it
+//	order.created   → create the payment record as "pending" (no auto-charge)
 //	order.cancelled → cancel a payment that has not settled yet
 //	order.completed → nothing to do
 func (s *PaymentService) HandleOrderEvent(ctx context.Context, event messaging.OrderEvent) error {
@@ -99,8 +99,12 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 				payment.ID, event.OrderID, event.EventID)
 			return nil
 		default:
-			// pending / failed → (re)attempt the charge.
-			return s.process(ctx, payment, payment.Method)
+			// pending / failed → payment exists but user hasn't paid yet.
+			// Do NOT auto-charge on redelivery — the user must explicitly
+			// initiate payment via POST /payments/:id/pay.
+			log.Printf("[payments] payment %d for order %d is %s — not auto-charging (event %s)",
+				payment.ID, event.OrderID, payment.Status, event.EventID)
+			return nil
 		}
 
 	case errors.Is(err, gorm.ErrRecordNotFound):
@@ -115,10 +119,13 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 		if err := s.repo.Create(ctx, payment); err != nil {
 			return fmt.Errorf("create payment for order %d: %w", event.OrderID, err)
 		}
-		log.Printf("[payments] created payment %d for order %d (amount %d %s, event %s)",
+		log.Printf("[payments] created payment %d for order %d (amount %d %s, event %s) — awaiting user to initiate payment",
 			payment.ID, payment.OrderID, payment.Amount, payment.Currency, event.EventID)
 
-		return s.process(ctx, payment, payment.Method)
+		// Do NOT auto-charge. In a real e-commerce flow the user must
+		// explicitly initiate payment via POST /payments/:id/pay. The payment
+		// stays "pending" until then.
+		return nil
 
 	default:
 		return fmt.Errorf("load payment for order %d: %w", event.OrderID, err)
@@ -271,8 +278,10 @@ func (s *PaymentService) GetUserPayments(
 	return s.repo.FindByUserID(ctx, userID, limit, offset)
 }
 
-// Pay (re)charges an unsettled payment. It is the manual/retry counterpart of
-// the automatic charge performed on order.created.
+// Pay charges a payment that has not settled yet. This is the primary entry
+// point for payment — the user explicitly initiates it via POST /payments/:id/pay.
+// The order.created consumer only creates the payment record as "pending";
+// it does NOT auto-charge. The user must call this endpoint to complete payment.
 func (s *PaymentService) Pay(
 	ctx context.Context,
 	userID uint,
