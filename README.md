@@ -34,14 +34,14 @@ The API Gateway is the single public entry point. Client requests arrive over HT
     "nodeSpacing": 12,
     "rankSpacing": 18,
     "curve": "linear",
-    "padding": 5
+    "padding": 10
   },
   "theme": "default"
 }}%%
 
 flowchart LR
 
-    C["CLIENT<br/>Browser / API Consumer"] --> GW
+    C["CLIENT<br/>Browser / API Consumer"]
 
     subgraph G["API GATEWAY · Go/Gin · :8000"]
         direction TB
@@ -53,7 +53,7 @@ flowchart LR
     end
 
     subgraph SERVICES["GO MICROSERVICES"]
-        direction LR
+        direction TB
 
         subgraph A["AUTH · :8081"]
             AS["Register · Login · Refresh<br/>Me · Logout · Logout-all"]
@@ -95,7 +95,7 @@ flowchart LR
     HDR -.->|"GET /products"| R
 
     subgraph MQ["RABBITMQ · ASYNC MESSAGING"]
-        direction TB
+        direction LR
         EX["Topic Exchanges<br/>order.events · payment.events"]
 
         QP["payment.order.events"]
@@ -115,7 +115,7 @@ flowchart LR
     QO -->|"Payment Result Events"| OS
 
     subgraph RELIABILITY["MESSAGE RELIABILITY"]
-        direction LR
+        direction TB
         RETRY["Retry Queues · TTL"]
         DLX["Dead Letter Exchange"]
         DLQ["Dead Letter Queue"]
