@@ -23,6 +23,12 @@ A documentation-first overview of the distributed backend: API gateway, independ
 
 ---
 
+<p align="center">
+  <img src="architecture.gif" width="100%" />
+</p>
+
+---
+
 ## 1. System overview
 
 The API Gateway is the single public entry point. Client requests arrive over HTTP and are routed to the appropriate backend service. Each service owns its own data store. Services communicate synchronously through gRPC when an immediate response is required, and asynchronously through RabbitMQ when work can proceed through events.
