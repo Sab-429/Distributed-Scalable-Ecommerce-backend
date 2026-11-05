@@ -1,0 +1,30 @@
+# Prometheus scrapes the OpenTelemetry Collector's Prometheus exporter,
+# which exposes every metric the Go services emit over OTLP.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: distributed-service
+
+rule_files:
+  # Optional alert rules; harmless if the file is absent.
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          source: otel-collector
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Direct scrape of Jaeger's internal metrics (optional visibility).
+  - job_name: jaeger
+    static_configs:
+      - targets: ["jaeger:14269"]
+        labels:
+          source: jaeger

@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 // Handle processes a single delivery. In a real system it would send an
@@ -25,16 +26,31 @@ func (c *Consumer) handle(ctx context.Context, d amqp.Delivery) error {
 
 	switch envelope.EventType {
 	case "order.created":
-		log.Printf("[notify] order %d created — sending confirmation to user %d (event %s)",
-			envelope.OrderID, envelope.UserID, envelope.EventID)
+		telemetry.L(ctx).InfoContext(ctx, "sending order confirmation",
+			"order_id", envelope.OrderID,
+			"user_id", envelope.UserID,
+			"event_id", envelope.EventID,
+			"event_type", envelope.EventType,
+		)
 	case "order.cancelled":
-		log.Printf("[notify] order %d cancelled — sending cancellation notice to user %d (event %s)",
-			envelope.OrderID, envelope.UserID, envelope.EventID)
+		telemetry.L(ctx).InfoContext(ctx, "sending cancellation notice",
+			"order_id", envelope.OrderID,
+			"user_id", envelope.UserID,
+			"event_id", envelope.EventID,
+			"event_type", envelope.EventType,
+		)
 	case "order.completed":
-		log.Printf("[notify] order %d completed — sending delivery update to user %d (event %s)",
-			envelope.OrderID, envelope.UserID, envelope.EventID)
+		telemetry.L(ctx).InfoContext(ctx, "sending delivery update",
+			"order_id", envelope.OrderID,
+			"user_id", envelope.UserID,
+			"event_id", envelope.EventID,
+			"event_type", envelope.EventType,
+		)
 	default:
-		log.Printf("[notify] unknown event type %q (event %s) — ignoring", envelope.EventType, envelope.EventID)
+		telemetry.L(ctx).WarnContext(ctx, "unknown event type, ignoring",
+			"event_type", envelope.EventType,
+			"event_id", envelope.EventID,
+		)
 	}
 
 	// Simulate slow notification work.

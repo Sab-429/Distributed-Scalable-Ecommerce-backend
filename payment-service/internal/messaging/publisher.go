@@ -7,6 +7,8 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 type Publisher struct {
@@ -40,15 +42,27 @@ func (p *Publisher) Setup() error {
 }
 
 // publish sends payload to routingKey and blocks until the broker confirms it.
+// It opens an OpenTelemetry producer span and injects the W3C trace context
+// into the AMQP headers, so consumers continue this trace.
 func (p *Publisher) publish(
 	ctx context.Context,
 	routingKey string,
 	payload any,
-) error {
+) (err error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal %s event: %w", routingKey, err)
 	}
+
+	info := telemetry.MessageInfo{
+		Exchange:   PaymentEventsExchange,
+		RoutingKey: routingKey,
+		MessageID:  routingKey + "-" + uuidFrom(payload),
+		EventType:  routingKey,
+	}
+	ctx, span, headers := telemetry.StartPublish(ctx, info, nil)
+	start := time.Now()
+	defer func() { telemetry.FinishPublish(ctx, span, start, info, err) }()
 
 	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
 		ctx,
@@ -58,9 +72,10 @@ func (p *Publisher) publish(
 		amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
-			MessageId:    routingKey + "-" + uuidFrom(payload),
+			MessageId:    info.MessageID,
 			Type:         routingKey,
 			Timestamp:    time.Now(),
+			Headers:      headers,
 			Body:         body,
 		},
 	)
@@ -119,7 +134,17 @@ func (p *Publisher) PublishRaw(
 	eventID string,
 	eventType string,
 	payload []byte,
-) error {
+) (err error) {
+	info := telemetry.MessageInfo{
+		Exchange:   PaymentEventsExchange,
+		RoutingKey: routingKey,
+		MessageID:  eventID,
+		EventType:  eventType,
+	}
+	ctx, span, headers := telemetry.StartPublish(ctx, info, nil)
+	start := time.Now()
+	defer func() { telemetry.FinishPublish(ctx, span, start, info, err) }()
+
 	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
 		ctx,
 		PaymentEventsExchange,
@@ -131,6 +156,7 @@ func (p *Publisher) PublishRaw(
 			MessageId:    eventID,
 			Type:         eventType,
 			Timestamp:    time.Now(),
+			Headers:      headers,
 			Body:         payload,
 		},
 	)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"order-service/internal/models"
 
+	"observability"
+
 	"gorm.io/gorm"
 )
 
@@ -39,6 +41,7 @@ func (r *OrderRepository) Create(
 			// Write the outbox event in the same transaction so the order
 			// and its event are committed atomically.
 			if outboxEvent != nil {
+				outboxEvent.TraceContext = telemetry.TraceparentFromContext(ctx)
 				if err := tx.Create(outboxEvent).Error; err != nil {
 					return err
 				}
@@ -76,6 +79,9 @@ func (r *OrderRepository) CreateWithOutbox(
 					return err
 				}
 				if outboxEvent != nil {
+					// Carry the originating request's W3C trace context into
+					// the outbox so the relay and all consumers join it.
+					outboxEvent.TraceContext = telemetry.TraceparentFromContext(ctx)
 					if err := tx.Create(outboxEvent).Error; err != nil {
 						return err
 					}

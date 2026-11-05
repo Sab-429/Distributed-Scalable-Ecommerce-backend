@@ -1,12 +1,15 @@
 package middleware
 
 import (
-	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"observability"
 )
 
+// Logging emits one structured JSON log line per request. trace_id / span_id
+// are attached by the shared logger from the request context.
 func Logging() gin.HandlerFunc {
 
 	return func(c *gin.Context) {
@@ -15,18 +18,19 @@ func Logging() gin.HandlerFunc {
 
 		c.Next()
 
-		duration := time.Since(start)
+		ctx := c.Request.Context()
 
 		requestID, _ :=
 			c.Get("request_id")
 
-		log.Printf(
-			"request_id=%v method=%s path=%s status=%d duration=%s",
-			requestID,
-			c.Request.Method,
-			c.Request.URL.Path,
-			c.Writer.Status(),
-			duration,
+		telemetry.L(ctx).InfoContext(ctx, "http request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"route", c.FullPath(),
+			"status", c.Writer.Status(),
+			"duration_ms", time.Since(start).Milliseconds(),
+			"request_id", requestID,
+			"client_ip", c.ClientIP(),
 		)
 	}
 }

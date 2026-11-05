@@ -28,6 +28,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+
+	"observability"
 )
 
 func main() {
@@ -47,6 +49,13 @@ func main() {
 
 	cfg := config.Load()
 
+	// ── Telemetry (traces → Jaeger, metrics → Prometheus, logs → Loki) ─────
+	tel, err := telemetry.Init(context.Background(), telemetry.OptionsFromEnv("product-service", "1.0.0"))
+	if err != nil {
+		log.Fatal("telemetry init failed:", err)
+	}
+	telemetry.InitLogger("product-service")
+
 	db, err := database.Connect(cfg)
 	if err != nil {
 		log.Fatal("Database connection failed:", err)
@@ -60,6 +69,8 @@ func main() {
 	if err != nil {
 		log.Fatal("Redis connection failed:", err)
 	}
+	redisClient.AddHook(telemetry.RedisHook())
+	defer redisClient.Close()
 	log.Println("Redis connected")
 
 	productCache := cache.NewProductCache(redisClient)
@@ -68,8 +79,9 @@ func main() {
 	// Build the handler with its service dependency injected.
 	productHandler := handler.NewProductHandler(productService)
 
-	// ── gRPC server ──────────────────────────────────────────────────────────
-	grpcServer := grpc.NewServer(
+	// ── gRPC server (OpenTelemetry stats handler + access log) ──────────────
+	grpcServer := grpc.NewServer(append(
+		telemetry.GRPCServerOptions(),
 		grpc.UnaryInterceptor(func(
 			ctx context.Context,
 			req interface{},
@@ -79,14 +91,14 @@ func main() {
 			start := time.Now()
 			resp, err := handler(ctx, req)
 			st, _ := status.FromError(err)
-			log.Printf("[gRPC] %s | %s | %s",
-				info.FullMethod,
-				st.Code(),
-				time.Since(start),
+			telemetry.L(ctx).InfoContext(ctx, "grpc request",
+				"method", info.FullMethod,
+				"code", st.Code().String(),
+				"duration_ms", time.Since(start).Milliseconds(),
 			)
 			return resp, err
 		}),
-	)
+	)...)
 
 	productGRPCServer := grpcserver.NewProductServer(productService)
 
@@ -108,7 +120,10 @@ func main() {
 	}()
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
-	router := gin.Default()
+	router := gin.New()
+	router.Use(telemetry.GinMiddleware("product-service")) // tracing + HTTP metrics
+	router.Use(telemetry.RequestLogger())                  // structured logs + trace_id
+	router.Use(gin.Recovery())
 
 	// Pass the fully-initialised handler, not a bare zero-value struct.
 	routes.SetupRoutes(router, productHandler)
@@ -151,6 +166,13 @@ func main() {
 	// GracefulStop waits for in-flight gRPC RPCs to finish, then stops the
 	// server. New requests are rejected during this time.
 	grpcServer.GracefulStop()
+
+	// Flush pending traces / metrics / logs before the process exits.
+	telCtx, telCancel := context.WithTimeout(context.Background(), telemetry.ShutdownTimeout)
+	defer telCancel()
+	if err := tel.Shutdown(telCtx); err != nil {
+		log.Println("telemetry shutdown:", err)
+	}
 
 	log.Println("product-service stopped")
 }

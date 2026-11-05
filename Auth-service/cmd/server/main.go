@@ -19,6 +19,8 @@ import (
 	"Auth-service/internal/repository"
 	"Auth-service/internal/routes"
 	"Auth-service/internal/service"
+
+	"observability"
 )
 
 func main() {
@@ -29,6 +31,13 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// ── Telemetry (traces → Jaeger, metrics → Prometheus, logs → Loki) ─────
+	tel, err := telemetry.Init(context.Background(), telemetry.OptionsFromEnv("auth-service", "1.0.0"))
+	if err != nil {
+		log.Fatal("telemetry init failed:", err)
+	}
+	telemetry.InitLogger("auth-service")
 
 	// ── Database ────────────────────────────────────────────────────────────
 	db, err := database.Connect(cfg)
@@ -57,21 +66,26 @@ func main() {
 
 	// ── Router ──────────────────────────────────────────────────────────────
 	router := gin.New()
+	router.Use(telemetry.GinMiddleware("auth-service")) // tracing + HTTP metrics
+	router.Use(telemetry.RequestLogger())               // structured logs + trace_id
 	router.Use(gin.Recovery())
-	router.Use(gin.Logger())
 
 	routes.SetupRoutes(router, authHandler, tokenSvc)
 
 	// ── Background: expired token cleanup (every 6 hours) ───────────────────
+	tokenCleaner := telemetry.NewWorker("auth-service.token-cleanup")
 	go func() {
 		ticker := time.NewTicker(6 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			if err := tokenRepo.DeleteExpired(); err != nil {
-				log.Println("Refresh token cleanup error:", err)
+			ctx, _, done := tokenCleaner.Start(context.Background(), "purge-expired-tokens")
+			err := tokenRepo.DeleteExpired()
+			if err != nil {
+				telemetry.L(ctx).ErrorContext(ctx, "refresh token cleanup failed", "error", err)
 			} else {
-				log.Println("Expired refresh tokens purged")
+				telemetry.L(ctx).InfoContext(ctx, "expired refresh tokens purged")
 			}
+			done(err)
 		}
 	}()
 
@@ -107,6 +121,13 @@ func main() {
 
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal("Auth service forced to shutdown:", err)
+	}
+
+	// Flush pending traces / metrics / logs before the process exits.
+	telCtx, telCancel := context.WithTimeout(context.Background(), telemetry.ShutdownTimeout)
+	defer telCancel()
+	if err := tel.Shutdown(telCtx); err != nil {
+		log.Println("telemetry shutdown:", err)
 	}
 
 	log.Println("Auth service stopped")

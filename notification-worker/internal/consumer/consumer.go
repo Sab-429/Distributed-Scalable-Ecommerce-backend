@@ -3,12 +3,14 @@ package consumer
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 // Consumer connects to RabbitMQ and processes order events from the
@@ -48,7 +50,7 @@ func New(cfg Config) (*Consumer, error) {
 		return nil, fmt.Errorf("failed to set qos: %w", err)
 	}
 
-	log.Println("RabbitMQ connected")
+	fmt.Println("RabbitMQ connected")
 	return &Consumer{
 		conn:       conn,
 		channel:    ch,
@@ -146,42 +148,72 @@ func (c *Consumer) Stop() {
 	c.Close()
 }
 
+// process handles one delivery inside a consumer span linked to the producer's
+// trace (W3C context is read from the AMQP headers) and records
+// messaging.process.* metrics for success / retry / dead-letter outcomes.
 func (c *Consumer) process(d amqp.Delivery) {
-	ctx := context.Background()
+	info := telemetry.MessageInfo{
+		Queue:      NotificationQueue,
+		RoutingKey: d.RoutingKey,
+		MessageID:  d.MessageId,
+		EventType:  d.Type,
+	}
+	ctx, span := telemetry.StartConsume(context.Background(), info, d.Headers)
+	start := time.Now()
 
 	if err := c.handle(ctx, d); err != nil {
 		retries := retryCount(d)
 		if isUnprocessable(err) || int(retries) >= c.maxRetries {
-			log.Printf("[consumer] giving up on message %s after %d retries: %v → DLQ",
-				d.MessageId, retries, err)
+			telemetry.L(ctx).ErrorContext(ctx, "giving up on message, dead-lettering",
+				"queue", NotificationQueue,
+				"message_id", d.MessageId,
+				"retries", retries,
+				"error", err,
+			)
+			telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeDeadLetter, err)
+			telemetry.RecordFailure(ctx, "notification-worker.consumer", "retries_exhausted", err)
 			_ = d.Nack(false, false) // dead-letters to OrderDLQ
 			return
 		}
 
 		// Republish to the retry exchange with an incremented retry counter,
 		// then ack the original so it doesn't double-deliver.
-		if err := c.republishForRetry(d, retries+1); err != nil {
-			log.Printf("[consumer] failed to republish for retry: %v → Nack(requeue=false)", err)
+		if rerr := c.republishForRetry(ctx, d, retries+1); rerr != nil {
+			telemetry.L(ctx).ErrorContext(ctx, "failed to republish for retry",
+				"queue", NotificationQueue,
+				"message_id", d.MessageId,
+				"error", rerr,
+			)
+			telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeError, rerr)
 			_ = d.Nack(false, false)
 			return
 		}
-		log.Printf("[consumer] retrying message %s (attempt %d/%d)", d.MessageId, retries+1, c.maxRetries)
+		telemetry.L(ctx).WarnContext(ctx, "retrying message",
+			"queue", NotificationQueue,
+			"message_id", d.MessageId,
+			"attempt", retries+1,
+			"max_retries", c.maxRetries,
+		)
+		telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeRetry, err)
 		_ = d.Ack(false)
 		return
 	}
 
+	telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeSuccess, nil)
 	_ = d.Ack(false)
 }
 
-func (c *Consumer) republishForRetry(d amqp.Delivery, retry int32) error {
+func (c *Consumer) republishForRetry(ctx context.Context, d amqp.Delivery, retry int32) error {
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
 		headers[k] = v
 	}
 	headers["x-retry-count"] = retry
+	// Keep the trace alive across the retry hop.
+	headers = telemetry.InjectTraceContext(ctx, headers)
 
 	return c.channel.PublishWithContext(
-		context.Background(),
+		ctx,
 		OrderRetryExchange,
 		d.RoutingKey,
 		false, false,

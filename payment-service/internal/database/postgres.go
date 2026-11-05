@@ -7,6 +7,8 @@ import (
 	"payment-service/internal/config"
 	"payment-service/internal/models"
 
+	"observability"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -41,6 +43,11 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+
+	// Trace every statement and record db.client.* metrics.
+	if err := db.Use(telemetry.GORMPlugin(cfg.DBName)); err != nil {
+		return nil, fmt.Errorf("install otel plugin: %w", err)
+	}
 
 	// Create / update the payments and outbox_events tables.
 	if err := db.AutoMigrate(&models.Payment{}, &models.OutboxEvent{}); err != nil {

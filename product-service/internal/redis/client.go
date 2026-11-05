@@ -59,6 +59,12 @@ func (c *Client) Delete(ctx context.Context, keys ...string) error {
 	return c.rdb.Del(ctx, keys...).Err()
 }
 
+// AddHook registers a go-redis hook on the underlying client. Used to attach
+// the shared OpenTelemetry instrumentation (telemetry.RedisHook).
+func (c *Client) AddHook(hook redis.Hook) {
+	c.rdb.AddHook(hook)
+}
+
 // Close cleanly shuts down the connection pool.
 func (c *Client) Close() error {
 	return c.rdb.Close()

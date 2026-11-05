@@ -2,12 +2,13 @@ package middleware
 
 import (
 	"bytes"
-	"log"
 	"net/http"
 
 	"api-gateway/internal/cache"
 
 	"github.com/gin-gonic/gin"
+
+	"observability"
 )
 
 // bodyWriter wraps gin.ResponseWriter so we can capture the response body
@@ -34,14 +35,18 @@ func ResponseCache(rc *cache.ResponseCache) gin.HandlerFunc {
 		path := c.Request.URL.RequestURI() // includes query string if any
 
 		// ── Cache check ───────────────────────────────────────────────────
-		cached, err := rc.Get(c.Request.Context(), path)
+		ctx := c.Request.Context()
+
+		cached, err := rc.Get(ctx, path)
 		if err != nil {
 			// Redis error — log and fall through to upstream (fail-open).
-			log.Printf("[cache] get error for %s: %v", path, err)
+			telemetry.L(ctx).WarnContext(ctx, "response cache get failed",
+				"path", path, "error", err)
 		}
 
 		if cached != "" {
-			log.Printf("[cache] HIT  %s", path)
+			telemetry.CacheLookup(ctx, "gateway.response", true)
+			telemetry.L(ctx).InfoContext(ctx, "response cache hit", "path", path)
 			c.Header("Content-Type", "application/json")
 			c.Header("X-Cache", "HIT")
 			c.String(http.StatusOK, cached)
@@ -49,7 +54,8 @@ func ResponseCache(rc *cache.ResponseCache) gin.HandlerFunc {
 			return
 		}
 
-		log.Printf("[cache] MISS %s", path)
+		telemetry.CacheLookup(ctx, "gateway.response", false)
+		telemetry.L(ctx).DebugContext(ctx, "response cache miss", "path", path)
 
 		// ── Cache miss: intercept the proxy response ───────────────────────
 		bw := &bodyWriter{
@@ -63,8 +69,9 @@ func ResponseCache(rc *cache.ResponseCache) gin.HandlerFunc {
 
 		// Only cache successful responses.
 		if bw.Status() == http.StatusOK && bw.body.Len() > 0 {
-			if setErr := rc.Set(c.Request.Context(), path, bw.body.String()); setErr != nil {
-				log.Printf("[cache] set error for %s: %v", path, setErr)
+			if setErr := rc.Set(ctx, path, bw.body.String()); setErr != nil {
+				telemetry.L(ctx).WarnContext(ctx, "response cache set failed",
+					"path", path, "error", setErr)
 			}
 		}
 	}
@@ -81,10 +88,12 @@ func ResponseCacheInvalidate(rc *cache.ResponseCache) gin.HandlerFunc {
 		status := c.Writer.Status()
 		if status >= 200 && status < 300 {
 			path := c.Request.URL.RequestURI()
-			if err := rc.Delete(c.Request.Context(), path); err != nil {
-				log.Printf("[cache] invalidate error for %s: %v", path, err)
+			ctx := c.Request.Context()
+			if err := rc.Delete(ctx, path); err != nil {
+				telemetry.L(ctx).WarnContext(ctx, "response cache invalidate failed",
+					"path", path, "error", err)
 			} else {
-				log.Printf("[cache] invalidated %s", path)
+				telemetry.L(ctx).InfoContext(ctx, "response cache invalidated", "path", path)
 			}
 		}
 	}

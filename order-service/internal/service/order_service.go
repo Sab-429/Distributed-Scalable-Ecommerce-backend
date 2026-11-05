@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"order-service/internal/clients"
 	"order-service/internal/dto"
 	"order-service/internal/messaging"
 	"order-service/internal/models"
 	"order-service/internal/repository"
 	"time"
+
+	"observability"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -76,11 +77,11 @@ func (s *OrderService) CreateOrder(
 	releaseAll := func() {
 		for _, r := range reserved {
 			if err := s.productClient.ReleaseStock(ctx, r.productID, r.quantity); err != nil {
-				log.Printf("[stock-rollback] failed to release %d units of product %d: %v",
-					r.quantity, r.productID, err)
+				telemetry.L(ctx).WarnContext(ctx, "stock rollback failed",
+					"quantity", r.quantity, "product_id", r.productID, "error", err)
 			} else {
-				log.Printf("[stock-rollback] released %d units of product %d",
-					r.quantity, r.productID)
+				telemetry.L(ctx).InfoContext(ctx, "stock rollback released",
+					"quantity", r.quantity, "product_id", r.productID)
 			}
 		}
 	}
@@ -209,7 +210,8 @@ func (s *OrderService) CreateOrder(
 		return nil, err
 	}
 
-	log.Printf("[outbox] queued order.created for order %d (event %s)", order.ID, event.EventID)
+	telemetry.L(ctx).InfoContext(ctx, "outbox queued order.created",
+		"order_id", order.ID, "event_id", event.EventID)
 
 	return order, nil
 }
@@ -293,7 +295,8 @@ func (s *OrderService) CancelOrder(
 		return err
 	}
 
-	log.Printf("[outbox] queued order.cancelled for order %d (event %s)", order.ID, event.EventID)
+	telemetry.L(ctx).InfoContext(ctx, "outbox queued order.cancelled",
+		"order_id", order.ID, "event_id", event.EventID)
 	return nil
 }
 
@@ -345,6 +348,7 @@ func (s *OrderService) CompleteOrder(
 		return err
 	}
 
-	log.Printf("[outbox] queued order.completed for order %d (event %s)", order.ID, event.EventID)
+	telemetry.L(ctx).InfoContext(ctx, "outbox queued order.completed",
+		"order_id", order.ID, "event_id", event.EventID)
 	return nil
 }

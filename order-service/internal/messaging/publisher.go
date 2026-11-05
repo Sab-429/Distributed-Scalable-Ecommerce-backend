@@ -7,6 +7,8 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 type Publisher struct {
@@ -123,6 +125,46 @@ func (p *Publisher) Setup() error {
 	return nil
 }
 
+// publish delivers one pre-built AMQP message to exchange/routingKey and
+// blocks until the broker confirms it. The OpenTelemetry producer span is
+// opened here and the W3C trace context is injected into the message headers,
+// so consumers continue the same distributed trace.
+func (p *Publisher) publish(
+	ctx context.Context,
+	exchange, routingKey string,
+	info telemetry.MessageInfo,
+	publishing amqp.Publishing,
+) (err error) {
+	ctx, span, headers := telemetry.StartPublish(ctx, info, nil)
+	start := time.Now()
+	defer func() { telemetry.FinishPublish(ctx, span, start, info, err) }()
+
+	publishing.Headers = headers
+
+	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
+		ctx,
+		exchange,
+		routingKey,
+		false, false,
+		publishing,
+	)
+	if err != nil {
+		return fmt.Errorf("publish %s: %w", routingKey, err)
+	}
+
+	// Block until RabbitMQ acknowledges the message, so a failure here
+	// (broker down, queue deleted, etc.) is surfaced to the caller instead
+	// of silently losing the event.
+	ack, err := dc.WaitContext(ctx)
+	if err != nil {
+		return fmt.Errorf("confirm %s publish: %w", routingKey, err)
+	}
+	if !ack {
+		return fmt.Errorf("confirm %s publish: broker nacked message", routingKey)
+	}
+	return nil
+}
+
 // PublishRaw publishes a pre-serialized event to the order.events exchange
 // using publisher confirms. It is used by the outbox relay, which provides
 // the routing key, event ID, event type, and already-marshaled payload.
@@ -133,32 +175,19 @@ func (p *Publisher) PublishRaw(
 	eventType string,
 	payload []byte,
 ) error {
-	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
-		ctx,
-		OrderEventsExchange,
-		routingKey,
-		false, false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    eventID,
-			Type:         eventType,
-			Timestamp:    time.Now(),
-			Body:         payload,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("publish outbox event %s: %w", eventID, err)
-	}
-
-	ack, err := dc.WaitContext(ctx)
-	if err != nil {
-		return fmt.Errorf("confirm outbox event %s publish: %w", eventID, err)
-	}
-	if !ack {
-		return fmt.Errorf("confirm outbox event %s publish: broker nacked message", eventID)
-	}
-	return nil
+	return p.publish(ctx, OrderEventsExchange, routingKey, telemetry.MessageInfo{
+		Exchange:   OrderEventsExchange,
+		RoutingKey: routingKey,
+		MessageID:  eventID,
+		EventType:  eventType,
+	}, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    eventID,
+		Type:         eventType,
+		Timestamp:    time.Now(),
+		Body:         payload,
+	})
 }
 
 // PublishOrderCreated publishes an order.created event to the main exchange.
@@ -168,35 +197,19 @@ func (p *Publisher) PublishOrderCreated(ctx context.Context, event OrderCreatedE
 		return fmt.Errorf("marshal order.created event: %w", err)
 	}
 
-	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
-		ctx,
-		OrderEventsExchange,
-		OrderCreatedRoutingKey,
-		false, false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    event.EventID,
-			Type:         event.EventType,
-			Timestamp:    time.Now(),
-			Body:         body,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("publish order.created: %w", err)
-	}
-
-	// Block until RabbitMQ acknowledges the message, so a failure here
-	// (broker down, queue deleted, etc.) is surfaced to the caller instead
-	// of silently losing the event.
-	ack, err := dc.WaitContext(ctx)
-	if err != nil {
-		return fmt.Errorf("confirm order.created publish: %w", err)
-	}
-	if !ack {
-		return fmt.Errorf("confirm order.created publish: broker nacked message")
-	}
-	return nil
+	return p.publish(ctx, OrderEventsExchange, OrderCreatedRoutingKey, telemetry.MessageInfo{
+		Exchange:   OrderEventsExchange,
+		RoutingKey: OrderCreatedRoutingKey,
+		MessageID:  event.EventID,
+		EventType:  event.EventType,
+	}, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    event.EventID,
+		Type:         event.EventType,
+		Timestamp:    time.Now(),
+		Body:         body,
+	})
 }
 
 // PublishOrderCompleted publishes an order.completed event to the main exchange.
@@ -206,35 +219,19 @@ func (p *Publisher) PublishOrderCompleted(ctx context.Context, event OrderComple
 		return fmt.Errorf("marshal order.completed event: %w", err)
 	}
 
-	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
-		ctx,
-		OrderEventsExchange,
-		OrderCompletedRoutingKey,
-		false, false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    event.EventID,
-			Type:         event.EventType,
-			Timestamp:    time.Now(),
-			Body:         body,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("publish order.completed: %w", err)
-	}
-
-	// Block until RabbitMQ acknowledges the message, so a failure here
-	// (broker down, queue deleted, etc.) is surfaced to the caller instead
-	// of silently losing the event.
-	ack, err := dc.WaitContext(ctx)
-	if err != nil {
-		return fmt.Errorf("confirm order.completed publish: %w", err)
-	}
-	if !ack {
-		return fmt.Errorf("confirm order.completed publish: broker nacked message")
-	}
-	return nil
+	return p.publish(ctx, OrderEventsExchange, OrderCompletedRoutingKey, telemetry.MessageInfo{
+		Exchange:   OrderEventsExchange,
+		RoutingKey: OrderCompletedRoutingKey,
+		MessageID:  event.EventID,
+		EventType:  event.EventType,
+	}, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    event.EventID,
+		Type:         event.EventType,
+		Timestamp:    time.Now(),
+		Body:         body,
+	})
 }
 
 // PublishOrderCancelled publishes an order.cancelled event to the main exchange.
@@ -244,33 +241,17 @@ func (p *Publisher) PublishOrderCancelled(ctx context.Context, event OrderCancel
 		return fmt.Errorf("marshal order.cancelled event: %w", err)
 	}
 
-	dc, err := p.channel.PublishWithDeferredConfirmWithContext(
-		ctx,
-		OrderEventsExchange,
-		OrderCancelledRoutingKey,
-		false, false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    event.EventID,
-			Type:         event.EventType,
-			Timestamp:    time.Now(),
-			Body:         body,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("publish order.cancelled: %w", err)
-	}
-
-	// Block until RabbitMQ acknowledges the message, so a failure here
-	// (broker down, queue deleted, etc.) is surfaced to the caller instead
-	// of silently losing the event.
-	ack, err := dc.WaitContext(ctx)
-	if err != nil {
-		return fmt.Errorf("confirm order.cancelled publish: %w", err)
-	}
-	if !ack {
-		return fmt.Errorf("confirm order.cancelled publish: broker nacked message")
-	}
-	return nil
+	return p.publish(ctx, OrderEventsExchange, OrderCancelledRoutingKey, telemetry.MessageInfo{
+		Exchange:   OrderEventsExchange,
+		RoutingKey: OrderCancelledRoutingKey,
+		MessageID:  event.EventID,
+		EventType:  event.EventType,
+	}, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		MessageId:    event.EventID,
+		Type:         event.EventType,
+		Timestamp:    time.Now(),
+		Body:         body,
+	})
 }

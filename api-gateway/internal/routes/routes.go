@@ -10,6 +10,8 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+
+	"observability"
 )
 
 // SetupRoutes registers all gateway routes.
@@ -33,12 +35,22 @@ func SetupRoutes(
 	rateLimiter *middleware.RateLimiter,
 	responseCache *cache.ResponseCache,
 ) {
-	// ── Global middleware ────────────────────────────────────────────────────
+	// ── Global middleware ───────────────────────────────────────────────
+	// Tracing + HTTP metrics FIRST so every other middleware and handler runs
+	// inside the request span and the W3C context is extracted here.
+	router.Use(telemetry.GinMiddleware("api-gateway"))
 	router.Use(middleware.Recovery())
 	router.Use(middleware.RequestID())
 	router.Use(middleware.Logging())
 	router.Use(middleware.SecurityHeaders())
 	router.Use(rateLimiter.Middleware())
+
+	// Reverse proxies get a client span each and inject the trace context into
+	// the upstream request headers (one continuous trace end-to-end).
+	productProxy = telemetry.ProxyTracing(productProxy)
+	authProxy = telemetry.ProxyTracing(authProxy)
+	orderProxy = telemetry.ProxyTracing(orderProxy)
+	paymentProxy = telemetry.ProxyTracing(paymentProxy)
 
 	router.Use(cors.New(cors.Config{
 		AllowOrigins: []string{

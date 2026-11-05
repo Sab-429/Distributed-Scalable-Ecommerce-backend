@@ -9,6 +9,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "order-service/proto/product/v1"
+
+	"observability"
 )
 
 // ProductClient wraps the gRPC ProductServiceClient.
@@ -20,9 +22,14 @@ type ProductClient struct {
 // NewProductClient dials the product-service gRPC server at the given address
 // (e.g. "localhost:50051") and returns a ready-to-use client.
 func NewProductClient(address string) (*ProductClient, error) {
+	// The OTel stats handler traces every RPC and injects the W3C trace
+	// context into the gRPC metadata so product-service joins this trace.
 	conn, err := grpc.NewClient(
 		address,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		append(
+			telemetry.GRPCClientDialOptions(),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to product service: %w", err)

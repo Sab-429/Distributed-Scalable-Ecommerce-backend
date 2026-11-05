@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -10,6 +11,8 @@ import (
 	"github.com/joho/godotenv"
 
 	"notification-worker/internal/consumer"
+
+	"observability"
 )
 
 func main() {
@@ -20,6 +23,13 @@ func main() {
 	}
 
 	cfg := consumer.LoadConfig()
+
+	// ── Telemetry (traces → Jaeger, metrics → Prometheus, logs → Loki) ─────
+	tel, err := telemetry.Init(context.Background(), telemetry.OptionsFromEnv("notification-worker", "1.0.0"))
+	if err != nil {
+		log.Fatal("telemetry init failed:", err)
+	}
+	telemetry.InitLogger("notification-worker")
 
 	c, err := consumer.New(cfg)
 	if err != nil {
@@ -44,5 +54,12 @@ func main() {
 	// Graceful shutdown: stop consuming, drain in-flight messages, then
 	// close the RabbitMQ connection.
 	c.Stop()
+
+	// Flush pending traces / metrics / logs before the process exits.
+	telCtx, telCancel := context.WithTimeout(context.Background(), telemetry.ShutdownTimeout)
+	defer telCancel()
+	if err := tel.Shutdown(telCtx); err != nil {
+		log.Println("telemetry shutdown:", err)
+	}
 	log.Println("shutting down notification-worker")
 }

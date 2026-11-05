@@ -22,6 +22,8 @@ import (
 	"order-service/internal/repository"
 	"order-service/internal/routes"
 	"order-service/internal/service"
+
+	"observability"
 )
 
 func main() {
@@ -32,6 +34,13 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// ── Telemetry (traces → Jaeger, metrics → Prometheus, logs → Loki) ─────
+	tel, err := telemetry.Init(context.Background(), telemetry.OptionsFromEnv("order-service", "1.0.0"))
+	if err != nil {
+		log.Fatal("telemetry init failed:", err)
+	}
+	telemetry.InitLogger("order-service")
 
 	// ── Database ─────────────────────────────────────────────────────────────
 	db, err := database.Connect(cfg)
@@ -114,6 +123,7 @@ func main() {
 
 	// ── HTTP server ───────────────────────────────────────────────────────────
 	router := gin.New()
+	router.Use(telemetry.GinMiddleware("order-service")) // tracing + HTTP metrics
 	router.Use(middleware.RequestID())
 	router.Use(middleware.Logging())
 	router.Use(middleware.Recovery())
@@ -154,6 +164,13 @@ func main() {
 
 	// Drain in-flight payment messages, then release the consumer connection.
 	paymentConsumer.Stop()
+
+	// Flush pending traces / metrics / logs before the process exits.
+	telCtx, telCancel := context.WithTimeout(context.Background(), telemetry.ShutdownTimeout)
+	defer telCancel()
+	if err := tel.Shutdown(telCtx); err != nil {
+		log.Println("telemetry shutdown:", err)
+	}
 
 	log.Println("order-service stopped")
 }

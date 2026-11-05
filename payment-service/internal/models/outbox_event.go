@@ -32,6 +32,11 @@ type OutboxEvent struct {
 	// Payload is the JSON-encoded event body that will be published to RabbitMQ.
 	Payload []byte `json:"payload" gorm:"type:bytea;not null"`
 
+	// TraceContext is the W3C "traceparent" of the request that produced this
+	// event. The relay restores it before publishing, so the broker hop and
+	// every consumer stay inside the original distributed trace.
+	TraceContext string `json:"trace_context" gorm:"type:varchar(64)"`
+
 	// Status tracks whether the relay has published this event.
 	Status OutboxEventStatus `json:"status" gorm:"type:varchar(20);not null;default:pending;index"`
 

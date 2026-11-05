@@ -1,0 +1,97 @@
+# OpenTelemetry Collector configuration for distributed-service.
+#
+# Pipeline: OTLP (4317 gRPC / 4318 HTTP)
+#             ├── traces  → jaeger exporter   (Jaeger UI  :16686)
+#             ├── metrics → prometheus exporter (scraped  :8889)
+#             └── logs    → otlphttp exporter  (Loki      :3100/otlp)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Optional: scrape the collector's own health/metrics.
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: otel-collector
+          scrape_interval: 15s
+          static_configs:
+            - targets: [localhost:8888]
+
+processors:
+  batch:
+    timeout: 2s
+    send_batch_size: 512
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  # Attributes added to every span/log/metric leaving the collector.
+  #
+  # resource_to_telemetry_conversion below turns resource attributes into
+  # metric labels. The Prometheus receiver stamps `job` and `instance` on both
+  # the resource AND the metric labels of everything it scrapes, so converting
+  # them would produce duplicate label names and drop the whole metric. Delete
+  # them from the resource; application metrics never carry them, and their own
+  # labels (`service_name`, `deployment_environment`, ...) survive.
+  resource:
+    attributes:
+      - key: collector.name
+        value: distributed-service-collector
+        action: upsert
+      - key: job
+        action: delete
+      - key: instance
+        action: delete
+
+exporters:
+  # Traces → Jaeger (OTLP is the native protocol of Jaeger 1.x+).
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics → Prometheus scrape endpoint on the collector itself.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+    enable_open_metrics: false
+
+  # Logs → Loki native OTLP endpoint.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/loki, debug]

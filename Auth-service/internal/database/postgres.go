@@ -5,6 +5,8 @@ import (
 	"Auth-service/internal/models"
 	"fmt"
 
+	"observability"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -25,6 +27,11 @@ func Connect(cfg config.Config) (*gorm.DB, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+
+	// Trace every statement and record db.client.* metrics.
+	if err := db.Use(telemetry.GORMPlugin(cfg.DBName)); err != nil {
+		return nil, fmt.Errorf("install otel plugin: %w", err)
 	}
 
 	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}); err != nil {

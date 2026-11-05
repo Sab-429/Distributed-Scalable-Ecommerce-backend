@@ -2,13 +2,14 @@ package handler
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"payment-service/internal/dto"
 	"payment-service/internal/service"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+
+	"observability"
 )
 
 type PaymentHandler struct {
@@ -136,7 +137,9 @@ func (h *PaymentHandler) Pay(c *gin.Context) {
 		// the money move is durable, so report success and let ops retry the
 		// notification instead of failing the request.
 		if payment != nil && errors.Is(err, service.ErrEventPublish) {
-			log.Printf("[payments] payment %d settled but event publish failed: %v", payment.ID, err)
+			telemetry.L(c.Request.Context()).ErrorContext(c.Request.Context(),
+				"payment settled but event publish failed",
+				"payment_id", payment.ID, "error", err)
 			c.JSON(http.StatusOK, payment)
 			return
 		}

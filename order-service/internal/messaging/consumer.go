@@ -3,11 +3,13 @@ package messaging
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 // OrderStore is the slice of the order repository this package needs. It is
@@ -167,42 +169,72 @@ func (c *PaymentConsumer) Stop() {
 	c.rabbit.Close()
 }
 
+// process handles one delivery inside a consumer span that is linked to the
+// producer's trace (W3C context is read from the AMQP headers) and records
+// messaging.process.* metrics for success / retry / dead-letter outcomes.
 func (c *PaymentConsumer) process(d amqp.Delivery) {
-	ctx := context.Background()
+	info := telemetry.MessageInfo{
+		Queue:      OrderPaymentQueue,
+		RoutingKey: d.RoutingKey,
+		MessageID:  d.MessageId,
+		EventType:  d.Type,
+	}
+	ctx, span := telemetry.StartConsume(context.Background(), info, d.Headers)
+	start := time.Now()
 
 	if err := c.handle(ctx, d); err != nil {
 		retries := retryCount(d)
 		if isUnprocessable(err) || int(retries) >= c.maxRetries {
-			log.Printf("[order-payment-consumer] giving up on message %s after %d retries: %v → DLQ",
-				d.MessageId, retries, err)
+			telemetry.L(ctx).ErrorContext(ctx, "giving up on message, dead-lettering",
+				"queue", OrderPaymentQueue,
+				"message_id", d.MessageId,
+				"retries", retries,
+				"error", err,
+			)
+			telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeDeadLetter, err)
+			telemetry.RecordFailure(ctx, "order-service.payment-consumer", "retries_exhausted", err)
 			_ = d.Nack(false, false) // dead-letters to OrderPaymentDLQ
 			return
 		}
 
 		// Republish to the retry exchange with an incremented retry counter,
 		// then ack the original so it doesn't double-deliver.
-		if err := c.republishForRetry(d, retries+1); err != nil {
-			log.Printf("[order-payment-consumer] failed to republish for retry: %v → Nack(requeue=false)", err)
+		if rerr := c.republishForRetry(ctx, d, retries+1); rerr != nil {
+			telemetry.L(ctx).ErrorContext(ctx, "failed to republish for retry",
+				"queue", OrderPaymentQueue,
+				"message_id", d.MessageId,
+				"error", rerr,
+			)
+			telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeError, rerr)
 			_ = d.Nack(false, false)
 			return
 		}
-		log.Printf("[order-payment-consumer] retrying message %s (attempt %d/%d)", d.MessageId, retries+1, c.maxRetries)
+		telemetry.L(ctx).WarnContext(ctx, "retrying message",
+			"queue", OrderPaymentQueue,
+			"message_id", d.MessageId,
+			"attempt", retries+1,
+			"max_retries", c.maxRetries,
+		)
+		telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeRetry, err)
 		_ = d.Ack(false)
 		return
 	}
 
+	telemetry.FinishConsume(ctx, span, start, info, telemetry.OutcomeSuccess, nil)
 	_ = d.Ack(false)
 }
 
-func (c *PaymentConsumer) republishForRetry(d amqp.Delivery, retry int32) error {
+func (c *PaymentConsumer) republishForRetry(ctx context.Context, d amqp.Delivery, retry int32) error {
 	headers := amqp.Table{}
 	for k, v := range d.Headers {
 		headers[k] = v
 	}
 	headers["x-retry-count"] = retry
+	// Keep the trace alive across the retry hop.
+	headers = telemetry.InjectTraceContext(ctx, headers)
 
 	return c.rabbit.Channel.PublishWithContext(
-		context.Background(),
+		ctx,
 		OrderPaymentRetryExchange,
 		d.RoutingKey,
 		false, false,

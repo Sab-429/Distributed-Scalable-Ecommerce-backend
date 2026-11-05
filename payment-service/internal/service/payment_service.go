@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"payment-service/internal/dto"
@@ -13,6 +12,8 @@ import (
 	"payment-service/internal/messaging"
 	"payment-service/internal/models"
 	"payment-service/internal/repository"
+
+	"observability"
 
 	"gorm.io/gorm"
 )
@@ -70,7 +71,8 @@ func (s *PaymentService) HandleOrderEvent(ctx context.Context, event messaging.O
 	case "order.completed":
 		return nil
 	default:
-		log.Printf("[payments] ignoring unknown event type %q (event %s)", event.EventType, event.EventID)
+		telemetry.L(ctx).WarnContext(ctx, "ignoring unknown event type",
+			"event_type", event.EventType, "event_id", event.EventID)
 		return nil
 	}
 }
@@ -91,26 +93,28 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 			if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
 				return fmt.Errorf("republish payment.completed for order %d: %w", event.OrderID, err)
 			}
-			log.Printf("[outbox] queued payment.completed (redelivery) for order %d", event.OrderID)
+			telemetry.L(ctx).InfoContext(ctx, "outbox queued payment.completed (redelivery)",
+				"order_id", event.OrderID)
 			return nil
 		case models.PaymentStatusCancelled:
-			log.Printf("[payments] order %d was cancelled — ignoring order.created (event %s)",
-				event.OrderID, event.EventID)
+			telemetry.L(ctx).InfoContext(ctx, "order cancelled, ignoring order.created",
+				"order_id", event.OrderID, "event_id", event.EventID)
 			return nil
 		case models.PaymentStatusProcessing:
 			// A charge is already in-flight for this order (e.g. a redelivered
 			// order.created arrived while the first process() call is still
 			// talking to the gateway).  Re-charging would double-charge the
 			// customer. Skip and let the in-flight charge complete.
-			log.Printf("[payments] payment %d for order %d is already processing — skipping redelivery (event %s)",
-				payment.ID, event.OrderID, event.EventID)
+			telemetry.L(ctx).WarnContext(ctx, "payment already processing, skipping redelivery",
+				"payment_id", payment.ID, "order_id", event.OrderID, "event_id", event.EventID)
 			return nil
 		default:
 			// pending / failed → payment exists but user hasn't paid yet.
 			// Do NOT auto-charge on redelivery — the user must explicitly
 			// initiate payment via POST /payments/:id/pay.
-			log.Printf("[payments] payment %d for order %d is %s — not auto-charging (event %s)",
-				payment.ID, event.OrderID, payment.Status, event.EventID)
+			telemetry.L(ctx).InfoContext(ctx, "payment exists, not auto-charging",
+				"payment_id", payment.ID, "order_id", event.OrderID,
+				"status", string(payment.Status), "event_id", event.EventID)
 			return nil
 		}
 
@@ -126,8 +130,9 @@ func (s *PaymentService) handleOrderCreated(ctx context.Context, event messaging
 		if err := s.repo.Create(ctx, payment); err != nil {
 			return fmt.Errorf("create payment for order %d: %w", event.OrderID, err)
 		}
-		log.Printf("[payments] created payment %d for order %d (amount %d %s, event %s) — awaiting user to initiate payment",
-			payment.ID, payment.OrderID, payment.Amount, payment.Currency, event.EventID)
+		telemetry.L(ctx).InfoContext(ctx, "payment created, awaiting user to initiate",
+			"payment_id", payment.ID, "order_id", payment.OrderID,
+			"amount", payment.Amount, "currency", payment.Currency, "event_id", event.EventID)
 
 		// Do NOT auto-charge. In a real e-commerce flow the user must
 		// explicitly initiate payment via POST /payments/:id/pay. The payment
@@ -145,7 +150,8 @@ func (s *PaymentService) handleOrderCancelled(ctx context.Context, event messagi
 		return fmt.Errorf("cancel payments for order %d: %w", event.OrderID, err)
 	}
 	if affected > 0 {
-		log.Printf("[payments] cancelled %d payment(s) for cancelled order %d", affected, event.OrderID)
+		telemetry.L(ctx).InfoContext(ctx, "payments cancelled with order",
+			"cancelled", affected, "order_id", event.OrderID)
 	}
 	return nil
 }
@@ -168,8 +174,9 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 		return fmt.Errorf("mark payment %d processing: %w", payment.ID, err)
 	}
 
-	log.Printf("[payments] charging payment %d (order %d, %d %s via %s)",
-		payment.ID, payment.OrderID, payment.Amount, payment.Currency, method)
+	telemetry.L(ctx).InfoContext(ctx, "charging payment",
+		"payment_id", payment.ID, "order_id", payment.OrderID,
+		"amount", payment.Amount, "currency", payment.Currency, "method", method)
 
 	result, err := s.gateway.Charge(ctx, gateway.ChargeRequest{
 		PaymentID: payment.ID,
@@ -185,7 +192,8 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 		payment.Status = models.PaymentStatusFailed
 		payment.FailureReason = truncate(err.Error(), 255)
 		if updErr := s.repo.Update(ctx, payment); updErr != nil {
-			log.Printf("[payments] failed to persist gateway error for payment %d: %v", payment.ID, updErr)
+			telemetry.L(ctx).ErrorContext(ctx, "failed to persist gateway error",
+				"payment_id", payment.ID, "error", updErr)
 		}
 		return fmt.Errorf("charge payment %d: %w", payment.ID, err)
 	}
@@ -205,8 +213,9 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 		if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
 			return fmt.Errorf("mark payment %d failed: %w", payment.ID, err)
 		}
-		log.Printf("[payments] payment %d declined for order %d: %s",
-			payment.ID, payment.OrderID, payment.FailureReason)
+		telemetry.L(ctx).WarnContext(ctx, "payment declined",
+			"payment_id", payment.ID, "order_id", payment.OrderID,
+			"reason", payment.FailureReason)
 
 		return nil
 	}
@@ -227,8 +236,9 @@ func (s *PaymentService) process(ctx context.Context, payment *models.Payment, m
 	if err := s.repo.UpdateWithOutbox(ctx, payment, outboxEvent); err != nil {
 		return fmt.Errorf("mark payment %d succeeded: %w", payment.ID, err)
 	}
-	log.Printf("[payments] payment %d succeeded for order %d (ref %s)",
-		payment.ID, payment.OrderID, payment.ProviderRef)
+	telemetry.L(ctx).InfoContext(ctx, "payment succeeded",
+		"payment_id", payment.ID, "order_id", payment.OrderID,
+		"provider_ref", payment.ProviderRef)
 
 	return nil
 }

@@ -7,6 +7,8 @@ import (
 	"order-service/internal/config"
 	"order-service/internal/models"
 
+	"observability"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -41,6 +43,11 @@ func Connect(cfg *config.Config) (*gorm.DB, error) {
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+
+	// Trace every statement and record db.client.* metrics.
+	if err := db.Use(telemetry.GORMPlugin(cfg.DBName)); err != nil {
+		return nil, fmt.Errorf("install otel plugin: %w", err)
+	}
 
 	// Create / update tables for Order, OrderItem, and OutboxEvent.
 	if err := db.AutoMigrate(&models.Order{}, &models.OrderItem{}, &models.OutboxEvent{}); err != nil {

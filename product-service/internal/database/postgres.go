@@ -5,6 +5,8 @@ import (
 	"product-service/internal/config"
 	"product-service/internal/models"
 
+	"observability"
+
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -20,6 +22,11 @@ func Connect(cfg config.Config)(*gorm.DB, error) {
 	)
 	db, err:= gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
+		return nil, err
+	}
+
+	// Trace every statement and record db.client.* metrics.
+	if err := db.Use(telemetry.GORMPlugin(cfg.DBName)); err != nil {
 		return nil, err
 	}
 

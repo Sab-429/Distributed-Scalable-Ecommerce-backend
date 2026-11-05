@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"observability"
 )
 
 // handle processes a single payment.* delivery.
@@ -38,21 +39,35 @@ func (c *PaymentConsumer) handle(ctx context.Context, d amqp.Delivery) error {
 		}
 
 		if !confirmed {
-			log.Printf("[orders] payment %d settled for order %d but it is not pending — already %s (event %s)",
-				event.PaymentID, event.OrderID, "handled", event.EventID)
+			telemetry.L(ctx).InfoContext(ctx, "payment already settled, order not pending",
+				"payment_id", event.PaymentID,
+				"order_id", event.OrderID,
+				"event_id", event.EventID,
+			)
 			return nil
 		}
 
-		log.Printf("[orders] payment %d succeeded (%d %s, ref %s) → order %d confirmed (event %s)",
-			event.PaymentID, event.Amount, event.Currency, event.ProviderRef, event.OrderID, event.EventID)
+		telemetry.L(ctx).InfoContext(ctx, "payment succeeded, order confirmed",
+			"payment_id", event.PaymentID,
+			"amount", event.Amount,
+			"currency", event.Currency,
+			"provider_ref", event.ProviderRef,
+			"order_id", event.OrderID,
+			"event_id", event.EventID,
+		)
 
 	case "payment.failed":
 		// The order stays pending: the user can retry the payment.
-		log.Printf("[orders] payment %d failed for order %d: %s (event %s) — order left pending",
-			event.PaymentID, event.OrderID, event.Reason, event.EventID)
+		telemetry.L(ctx).WarnContext(ctx, "payment failed, order left pending",
+			"payment_id", event.PaymentID,
+			"order_id", event.OrderID,
+			"reason", event.Reason,
+			"event_id", event.EventID,
+		)
 
 	default:
-		log.Printf("[orders] unknown payment event type %q (event %s) — ignoring", event.EventType, event.EventID)
+		telemetry.L(ctx).WarnContext(ctx, "unknown payment event type",
+			"event_type", event.EventType, "event_id", event.EventID)
 	}
 
 	return nil

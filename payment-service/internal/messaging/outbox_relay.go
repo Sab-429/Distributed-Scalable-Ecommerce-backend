@@ -2,10 +2,11 @@ package messaging
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"payment-service/internal/repository"
+
+	"observability"
 )
 
 // OutboxRelay is a background worker that polls the outbox table for pending
@@ -13,12 +14,17 @@ import (
 // as published. At-least-once delivery: if it crashes after RabbitMQ confirms
 // but before marking the row, the row stays pending and gets republished next
 // cycle. Consumers are idempotent (ConfirmOrder guards on status=pending).
+//
+// Observability: every poll runs inside a "payment-service.outbox poll" span
+// and the trace context stored on the outbox row is restored before publishing,
+// so the broker hop and all consumers stay in the originating request's trace.
 type OutboxRelay struct {
 	outboxRepo *repository.OutboxRepository
 	publisher  *Publisher
 	batchSize  int
 	interval   time.Duration
 	stopCh     chan struct{}
+	worker     *telemetry.Worker
 }
 
 func NewOutboxRelay(
@@ -33,12 +39,14 @@ func NewOutboxRelay(
 		batchSize:  batchSize,
 		interval:   interval,
 		stopCh:     make(chan struct{}),
+		worker:     telemetry.NewWorker("payment-service.outbox"),
 	}
 }
 
 func (r *OutboxRelay) Start() {
 	go r.run()
-	log.Printf("[outbox-relay] started (batch=%d, interval=%s)", r.batchSize, r.interval)
+	telemetry.L(context.Background()).InfoContext(context.Background(),
+		"outbox relay started", "batch", r.batchSize, "interval", r.interval.String())
 }
 
 func (r *OutboxRelay) Stop() {
@@ -52,7 +60,7 @@ func (r *OutboxRelay) run() {
 	for {
 		select {
 		case <-r.stopCh:
-			log.Println("[outbox-relay] stopping")
+			telemetry.L(context.Background()).InfoContext(context.Background(), "outbox relay stopping")
 			return
 		case <-ticker.C:
 			r.pollAndPublish()
@@ -60,41 +68,62 @@ func (r *OutboxRelay) run() {
 	}
 }
 
+// pollAndPublish wraps one poll cycle in a worker span + metrics.
 func (r *OutboxRelay) pollAndPublish() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, _, done := r.worker.Start(context.Background(), "poll")
+	done(r.pollAndPublishCtx(ctx))
+}
+
+func (r *OutboxRelay) pollAndPublishCtx(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	events, err := r.outboxRepo.GetPending(ctx, r.batchSize)
 	if err != nil {
-		log.Printf("[outbox-relay] failed to fetch pending events: %v", err)
-		return
+		telemetry.L(ctx).ErrorContext(ctx, "failed to fetch pending outbox events", "error", err)
+		return err
 	}
 	if len(events) == 0 {
-		return
+		return nil
 	}
 
 	published := 0
+	var firstErr error
+
 	for _, event := range events {
+		// Re-attach the trace of the request that wrote this outbox row so
+		// the async chain shares one trace.
+		publishCtx := telemetry.ContextWithTraceparent(ctx, event.TraceContext)
+
 		if err := r.publisher.PublishRaw(
-			ctx,
+			publishCtx,
 			event.RoutingKey,
 			event.EventID,
 			event.EventType,
 			event.Payload,
 		); err != nil {
-			log.Printf("[outbox-relay] failed to publish event %s (type %s, payment %d): %v",
-				event.EventID, event.EventType, event.AggregateID, err)
+			telemetry.L(ctx).ErrorContext(ctx, "failed to publish outbox event",
+				"event_id", event.EventID,
+				"event_type", event.EventType,
+				"aggregate_id", event.AggregateID,
+				"error", err,
+			)
+			firstErr = err
 			break
 		}
 
 		if err := r.outboxRepo.MarkPublished(ctx, event.ID); err != nil {
-			log.Printf("[outbox-relay] failed to mark event %d published: %v", event.ID, err)
+			telemetry.L(ctx).ErrorContext(ctx, "failed to mark outbox event published",
+				"outbox_id", event.ID, "event_id", event.EventID, "error", err)
+			firstErr = err
 			break
 		}
 		published++
 	}
 
 	if published > 0 {
-		log.Printf("[outbox-relay] published %d/%d outbox events", published, len(events))
+		telemetry.L(ctx).InfoContext(ctx, "published outbox events",
+			"published", published, "batch", len(events))
 	}
+	return firstErr
 }

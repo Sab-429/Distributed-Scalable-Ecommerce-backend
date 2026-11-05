@@ -9,6 +9,8 @@ import (
 
 	redisclient "product-service/internal/redis"
 	"product-service/internal/models"
+
+	"observability"
 )
 
 const productTTL = 10 * time.Minute
@@ -32,10 +34,13 @@ func (pc *ProductCache) Get(ctx context.Context, id uint) (*models.Product, erro
 	if err != nil {
 		if errors.Is(err, redisclient.ErrNil) {
 			// Cache miss — not an error
+			telemetry.CacheLookup(ctx, "product", false)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("cache get product %d: %w", id, err)
 	}
+
+	telemetry.CacheLookup(ctx, "product", true)
 
 	var product models.Product
 	if err := json.Unmarshal([]byte(val), &product); err != nil {

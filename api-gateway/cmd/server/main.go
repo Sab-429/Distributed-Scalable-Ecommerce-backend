@@ -20,6 +20,8 @@ import (
 	"api-gateway/internal/proxy"
 	"api-gateway/internal/redis"
 	"api-gateway/internal/routes"
+
+	"observability"
 )
 
 func main() {
@@ -31,11 +33,19 @@ func main() {
 
 	cfg := config.Load()
 
+	// ── Telemetry (traces → Jaeger, metrics → Prometheus, logs → Loki) ─────
+	tel, err := telemetry.Init(context.Background(), telemetry.OptionsFromEnv("api-gateway", "1.0.0"))
+	if err != nil {
+		log.Fatal("telemetry init failed:", err)
+	}
+	telemetry.InitLogger("api-gateway")
+
 	// ── Redis ────────────────────────────────────────────────────────────────
 	redisClient, err := redis.New(cfg.RedisAddr)
 	if err != nil {
 		log.Fatal("Redis connection failed:", err)
 	}
+	redisClient.AddHook(telemetry.RedisHook())
 	defer redisClient.Close()
 	log.Println("Redis connected")
 
@@ -107,6 +117,13 @@ func main() {
 
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal("Gateway forced to shutdown:", err)
+	}
+
+	// Flush pending traces / metrics / logs before the process exits.
+	telCtx, telCancel := context.WithTimeout(context.Background(), telemetry.ShutdownTimeout)
+	defer telCancel()
+	if err := tel.Shutdown(telCtx); err != nil {
+		log.Println("telemetry shutdown:", err)
 	}
 
 	log.Println("API Gateway stopped")

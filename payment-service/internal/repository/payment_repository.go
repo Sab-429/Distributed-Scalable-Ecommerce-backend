@@ -4,6 +4,8 @@ import (
 	"context"
 	"payment-service/internal/models"
 
+	"observability"
+
 	"gorm.io/gorm"
 )
 
@@ -99,6 +101,9 @@ func (r *PaymentRepository) UpdateWithOutbox(
 				return err
 			}
 			if outboxEvent != nil {
+				// Carry the originating request's W3C trace context into the
+				// outbox so the relay and all consumers join it.
+				outboxEvent.TraceContext = telemetry.TraceparentFromContext(ctx)
 				if err := tx.Create(outboxEvent).Error; err != nil {
 					return err
 				}
