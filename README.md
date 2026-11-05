@@ -28,46 +28,54 @@ A documentation-first overview of the distributed backend: API gateway, independ
 The API Gateway is the single public entry point. Client requests arrive over HTTP and are routed to the appropriate backend service. Each service owns its own data store. Services communicate synchronously through gRPC when an immediate response is required, and asynchronously through RabbitMQ when work can proceed through events.
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 20, "rankSpacing": 25, "curve": "linear"}, "theme": "default"} }%%
+%%{init: {
+  "flowchart": {
+    "htmlLabels": true,
+    "nodeSpacing": 12,
+    "rankSpacing": 18,
+    "curve": "linear",
+    "padding": 5
+  },
+  "theme": "default"
+}}%%
+
 flowchart TB
 
-    C["Browser / API Consumer"] --> GW
+    C["CLIENT<br/>Browser / API Consumer"] --> GW
 
-    subgraph G["API GATEWAY — Go + Gin :8000"]
+    subgraph G["API GATEWAY · Go/Gin · :8000"]
         direction TB
-        GW["Gateway Router"]
+        GW["Router / Reverse Proxy"]
         MW["Recovery · Request ID · Logging<br/>Security Headers · Rate Limit · CORS"]
-        AZ["Public Routes · JWT Authorization<br/>Role Checks"]
-        HDR["Strip Client Identity Headers<br/>Set Verified User ID / Role"]
-        GC["Gateway Response Cache<br/>GET /products"]
-        GW --> MW --> AZ --> HDR
-        HDR -.-> GC
+        AUTHZ["Public Auth Routes · JWT · Role Checks"]
+        HDR["Strip Spoofed Identity Headers<br/>Set Verified User ID / Role"]
+        GW --> MW --> AUTHZ --> HDR
     end
 
-    subgraph S["MICROSERVICES"]
+    subgraph SERVICES["GO MICROSERVICES"]
         direction LR
 
-        subgraph A["AUTH :8081"]
-            AS["Register · Login · Refresh<br/>Me · Logout"]
-            ADB[("Auth PostgreSQL<br/>users · refresh_tokens")]
+        subgraph A["AUTH · :8081"]
+            AS["Register · Login · Refresh<br/>Me · Logout · Logout-all"]
+            ADB[("PostgreSQL<br/>users · refresh_tokens")]
             AS --> ADB
         end
 
-        subgraph P["PRODUCT :8080"]
-            PS["Product CRUD<br/>gRPC :50051<br/>GetProduct · ReserveStock"]
-            PDB[("Product PostgreSQL<br/>products")]
+        subgraph P["PRODUCT · :8080"]
+            PS["CRUD · gRPC :50051<br/>GetProduct · ReserveStock"]
+            PDB[("PostgreSQL<br/>products")]
             PS --> PDB
         end
 
-        subgraph O["ORDER :8082"]
-            OS["Create · Get · List<br/>Cancel · Complete"]
-            ODB[("Order PostgreSQL<br/>orders · order_items")]
+        subgraph O["ORDER · :8082"]
+            OS["Create · List · Get<br/>Cancel · Complete"]
+            ODB[("PostgreSQL<br/>orders · order_items")]
             OS --> ODB
         end
 
-        subgraph PAY["PAYMENT :8083"]
-            PY["Create · Get · List<br/>POST /payments/:id/pay"]
-            PAYDB[("Payment PostgreSQL<br/>payments")]
+        subgraph PAY["PAYMENT · :8083"]
+            PY["Create · List · Get<br/>POST /payments/:id/pay"]
+            PAYDB[("PostgreSQL<br/>payments")]
             PY --> PAYDB
         end
     end
@@ -77,13 +85,16 @@ flowchart TB
     HDR -->|"HTTP"| OS
     HDR -->|"HTTP"| PY
 
-    OS <-->|"gRPC"| PS
+    OS <-->|"gRPC · GetProduct · ReserveStock"| PS
 
-    REDIS[("Redis :6379<br/>Product Cache · Gateway Cache")]
-    PS <-->|"Cache Aside"| REDIS
-    GC <-->|"Response Cache"| REDIS
+    subgraph CACHE["CACHING"]
+        R[("Redis · :6379<br/>Product Cache · product:*<br/>Gateway Cache · gw:response:*<br/>TTL: 10m / 5m")]
+    end
 
-    subgraph M["RABBITMQ — Messaging"]
+    PS <-->|"Cache Aside"| R
+    HDR -.->|"GET /products"| R
+
+    subgraph MQ["RABBITMQ · ASYNC MESSAGING"]
         direction TB
         EX["Topic Exchanges<br/>order.events · payment.events"]
 
@@ -96,24 +107,61 @@ flowchart TB
         EX --> QO
     end
 
-    OS -->|"order.created / cancelled / completed"| EX
-    PY -->|"payment.completed / failed"| EX
+    OS -->|"order.created · cancelled · completed"| EX
+    PY -->|"payment.completed · failed"| EX
 
     QP -->|"order.created"| PY
     QN --> NW["Notification Worker"]
-    QO -->|"Payment result events"| OS
+    QO -->|"Payment Result Events"| OS
 
-    subgraph R["RETRY & FAILURE HANDLING"]
+    subgraph RELIABILITY["MESSAGE RELIABILITY"]
         direction LR
-        RQ["Retry Queues<br/>TTL"] --> DLX["Dead Letter Exchange"] --> DLQ["Dead Letter Queue"]
+        RETRY["Retry Queues · TTL"]
+        DLX["Dead Letter Exchange"]
+        DLQ["Dead Letter Queue"]
+        RETRY --> DLX --> DLQ
     end
 
-    QP -.-> RQ
-    QN -.-> RQ
-    QO -.-> RQ
+    QP -.-> RETRY
+    QN -.-> RETRY
+    QO -.-> RETRY
 
-    RULE["Payment lifecycle:<br/>order.created → PENDING<br/>Explicit /pay request → Processing<br/>Confirmed result → SUCCEEDED / FAILED"]
-    PY -.-> RULE
+    subgraph OUTBOX["TRANSACTIONAL OUTBOX"]
+        direction LR
+        TX["DB Transaction<br/>Business Data + Outbox Event"]
+        RELAY["Outbox Relay"]
+        CONFIRM["RabbitMQ Publisher Confirm<br/>Mark Event Published"]
+        TX --> RELAY --> CONFIRM
+    end
+
+    CONFIRM -.-> EX
+
+    subgraph PAYMENT_FLOW["PAYMENT LIFECYCLE"]
+        direction LR
+        PENDING["order.created<br/>PENDING"]
+        PROCESS["Explicit /pay Request<br/>PROCESSING"]
+        RESULT["Confirmed Result<br/>SUCCEEDED / FAILED"]
+        PENDING --> PROCESS --> RESULT
+    end
+
+    PY -.-> PENDING
+
+    INFRA["INFRASTRUCTURE<br/>Docker Compose · Containers · Independent PostgreSQL DBs<br/>Internal HTTP · gRPC · Redis · RabbitMQ Workers"]
+    SERVICES --- INFRA
+
+    classDef gateway fill:#dceaff,stroke:#3974c6,color:#17243a
+    classDef auth fill:#eee7ff,stroke:#7354b5,color:#17243a
+    classDef product fill:#e1f5eb,stroke:#2e8b68,color:#17243a
+    classDef order fill:#fff0d9,stroke:#bd7b25,color:#17243a
+    classDef payment fill:#ffe5e5,stroke:#b95757,color:#17243a
+    classDef infra fill:#f0f2f5,stroke:#68778d,color:#17243a
+
+    class GW,MW,AUTHZ,HDR gateway
+    class AS,ADB auth
+    class PS,PDB product
+    class OS,ODB order
+    class PY,PAYDB payment
+    class R,EX,QP,QN,QO,NW,RETRY,DLX,DLQ,TX,RELAY,CONFIRM,INFRA infra
 ```
 
 ### High-level communication rules
