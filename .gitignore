@@ -36,5 +36,5 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
-server
+**/server
 server.exe
