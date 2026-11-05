@@ -39,7 +39,7 @@ The API Gateway is the single public entry point. Client requests arrive over HT
   "theme": "default"
 }}%%
 
-flowchart TB
+flowchart LR
 
     C["CLIENT<br/>Browser / API Consumer"] --> GW
 
