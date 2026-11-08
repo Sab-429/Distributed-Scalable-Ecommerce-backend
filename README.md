@@ -19,7 +19,7 @@ A documentation-first overview of the distributed backend: API gateway, independ
 9. [End-to-end order lifecycle](#9-end-to-end-order-lifecycle)
 10. [Ports and protocols](#10-ports-and-protocols)
 11. [Security and reliability considerations](#11-security-and-reliability-considerations)
-12. [Suggested production improvements](#12-suggested-production-improvements)
+
 
 ---
 
@@ -613,23 +613,6 @@ The RabbitMQ and PostgreSQL ports above are conventional defaults, not a claim a
 ### Observability
 
 Propagate `X-Request-ID` through HTTP requests and include correlation/event IDs in logs. For asynchronous flows, a message should carry a correlation ID so that the original request and later consumer activity can be traced together.
-
----
-
-## 12. Suggested production improvements
-
-These are recommended next steps; they should not be interpreted as already implemented unless the project contains them.
-
-1. **Transactional outbox:** make database commits and event publication reliable.
-2. **Idempotency:** prevent duplicate order/payment processing.
-3. **OpenTelemetry:** distributed traces across gateway, gRPC and RabbitMQ consumers.
-4. **Prometheus + Grafana:** metrics for latency, error rate, queue depth, retries, DLQ size, cache hit ratio and database health.
-5. **Health/readiness probes:** distinguish process liveness from dependency readiness.
-6. **TLS/mTLS:** encrypt and authenticate service-to-service traffic outside local development.
-7. **Secrets management:** keep database credentials, JWT keys and broker credentials outside source control.
-8. **Graceful shutdown:** stop accepting new requests, finish or safely requeue in-flight work, then close connections.
-9. **Resilience controls:** deadlines, bounded retries, circuit breakers and concurrency limits.
-10. **Deployment automation:** container images, Docker Compose for local integration, Kubernetes for orchestration, CI/CD and GitOps.
 
 ---
 
